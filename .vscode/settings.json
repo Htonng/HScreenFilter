@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^\\$mp = \"C:\\\\Users\\\\Hotto\\\\\\.nuget\\\\packages\\\\microsoft\\.windows\\.sdk\\.buildtools\\\\10\\.0\\.28000\\.2526\\\\bin\\\\10\\.0\\.28000\\.0\\\\x64\\\\makepri\\.exe\"; \\$dir = \"\\$env:TEMP\\\\pritest\"; New-Item -ItemType Directory -Force -Path \\$dir \\| Out-Null; & \\$mp createconfig /cf \"\\$dir\\\\priconfig\\.xml\" /dq lang-en-US /o 2>&1 \\| Out-Null; New-Item -ItemType Directory -Force -Path \"\\$dir\\\\root\" \\| Out-Null; & \\$mp new /pr \"\\$dir\\\\root\" /cf \"\\$dir\\\\priconfig\\.xml\" /of \"\\$dir\\\\resources\\.pri\" /o 2>&1 \\| Select-Object -Last 8; Write-Output \"---- result ----\"; Get-Item \"\\$dir\\\\resources\\.pri\" -ErrorAction SilentlyContinue \\| Select-Object Name, Length$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

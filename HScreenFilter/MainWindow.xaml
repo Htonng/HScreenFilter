@@ -1,0 +1,129 @@
+﻿<Window
+    x:Class="HScreenFilter.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:HScreenFilter.Controls"
+    Title="屏幕滤镜">
+
+    <!-- 整页滚动：窗口较小时可上下滚动查看全部内容（滑块 + 配置 + 开机自启） -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  ZoomMode="Disabled">
+        <Grid x:Name="RootGrid" KeyDown="RootGrid_KeyDown" IsTabStop="True">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- ============ 头部 ============ -->
+            <StackPanel Grid.Row="0" Padding="24,16,24,10" Spacing="4">
+                <TextBlock Text="屏幕滤镜" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock x:Name="StatusText" FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Text="正在初始化…"/>
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ToggleSwitch x:Name="EnableSwitch" Header="启用滤镜"
+                                  OnContent="已启用" OffContent="已关闭"
+                                  Toggled="EnableSwitch_Toggled" Margin="0,4,0,0"/>
+                    <Border x:Name="GlobalHotkeyBadge" Grid.Column="1"
+                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                            CornerRadius="8" Padding="10,4" VerticalAlignment="Center"
+                            HorizontalAlignment="Left" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="全局开关" FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <TextBlock x:Name="GlobalHotkeyText" FontSize="11" FontWeight="SemiBold"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </StackPanel>
+
+            <!-- ============ 滑块 ============ -->
+            <Grid Grid.Row="1">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Padding="24,4,24,8" Spacing="16">
+                        <controls:FilterSlider x:Name="BrightnessSlider" Header="亮度 Brightness" Minimum="-100" Maximum="100"/>
+                        <controls:FilterSlider x:Name="ContrastSlider" Header="对比度 Contrast" Minimum="0" Maximum="200"/>
+                        <controls:FilterSlider x:Name="SaturationSlider" Header="鲜艳度 Saturation" Minimum="0" Maximum="200"/>
+                        <controls:FilterSlider x:Name="HighlightSlider" Header="亮部 Highlights" Minimum="-100" Maximum="100"/>
+                        <controls:FilterSlider x:Name="ShadowSlider" Header="暗部 Shadows" Minimum="-100" Maximum="100"/>
+                        <controls:FilterSlider x:Name="TemperatureSlider" Header="色温（冷 ← → 暖）" Minimum="-100" Maximum="100"/>
+
+                        <TextBlock Text="快捷预设" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0"/>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="标准" Click="PresetStandard_Click"/>
+                            <Button Content="护眼" Click="PresetEyeCare_Click"/>
+                            <Button Content="夜间" Click="PresetNight_Click"/>
+                            <Button Content="鲜艳" Click="PresetVivid_Click"/>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+
+            <!-- ============ 配置文件与快捷键 ============ -->
+            <StackPanel Grid.Row="2" Padding="24,10,24,16" Spacing="8">
+                <Border BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                        Margin="0,-10,0,6"/>
+
+                <ListView x:Name="ProfileList" Height="104" SelectionMode="Single"
+                          SelectionChanged="ProfileList_SelectionChanged">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                        CornerRadius="8" Padding="8,3" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding HotkeyDisplay}" FontSize="11"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                </Border>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="新建配置" Click="NewProfile_Click"/>
+                    <Button Content="更新所选" Click="UpdateProfile_Click"/>
+                    <Button Content="应用所选" Click="ApplyProfile_Click"/>
+                    <Button Content="删除配置" Click="DeleteProfile_Click"/>
+                </StackPanel>
+
+                <Grid ColumnSpacing="12" RowSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="所选配置快捷键" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                        <Button Content="设置快捷键…" Click="CaptureHotkey_Click"/>
+                        <Button Content="清除" Click="ClearHotkey_Click"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="全局开关快捷键" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                        <Button Content="设置快捷键…" Click="CaptureGlobalHotkey_Click"/>
+                        <Button Content="清除" Click="ClearGlobalHotkey_Click"/>
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock x:Name="CaptureHint" FontSize="12"
+                           Foreground="{ThemeResource SystemFillColorCautionBrush}" Text=""/>
+
+                <ToggleSwitch x:Name="AutoStartSwitch" Header="开机自动启动" Toggled="AutoStartSwitch_Toggled"/>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Window>

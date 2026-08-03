@@ -1,0 +1,13 @@
+## .NET / MSBuild
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## 构建日志
+build.log
+*.log
+
+## 运行时生成
+startup-error.log
