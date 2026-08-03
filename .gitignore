@@ -11,3 +11,9 @@ build.log
 
 ## 运行时生成
 startup-error.log
+
+## 发布产物（安装程序/便携版 zip/便携目录）
+releases/*.zip
+releases/*.exe
+releases/v*/
+releases/**/portable/
