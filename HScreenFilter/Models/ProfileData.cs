@@ -14,4 +14,9 @@ public class ProfileData
 
     public bool AutoStart { get; set; }
     public bool MinimizeToTray { get; set; } = true;
+
+    // 按前台应用自动切换滤镜
+    public bool PerAppEnabled { get; set; }
+    public string PerAppProcess { get; set; } = "";
+    public string PerAppTitle { get; set; } = "";
 }

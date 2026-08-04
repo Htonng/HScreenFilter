@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -35,6 +36,18 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "屏幕滤镜";
+
+        // 设置窗口与任务栏图标
+        try
+        {
+            string iconPath = Path.Combine(AppContext.BaseDirectory, "assets", "icon.ico");
+            if (File.Exists(iconPath))
+                this.AppWindow.SetIcon(iconPath);
+        }
+        catch
+        {
+            // 图标设置失败不影响主流程
+        }
 
         // Window 自身有实例属性 DispatcherQueue，会遮蔽类型名，这里用完全限定名。
         var dq = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
@@ -85,6 +98,18 @@ public sealed partial class MainWindow : Window
         EnableSwitch.IsOn = _data.IsEnabled; // 触发 Toggled → 应用滤镜
         UpdateGlobalHotkeyBadge();
 
+        // 按应用切换滤镜
+        _foregroundWatcher = new ForegroundAppWatcher();
+        _foregroundWatcher.MatchChanged += ForegroundWatcher_MatchChanged;
+        _perAppInit = true;
+        PerAppSwitch.IsOn = _data.PerAppEnabled;
+        PerAppProcessBox.Text = _data.PerAppProcess;
+        PerAppTitleBox.Text = _data.PerAppTitle;
+        _perAppInit = false;
+        UpdatePerAppStatus();
+        if (_data.PerAppEnabled)
+            StartPerAppWatching();
+
         // 全局热键 + 系统托盘（共用一个消息窗口）
         _msgWindow = MessageWindow.Create();
         _hotkeys = new HotkeyService(_msgWindow);
@@ -100,6 +125,9 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _sizeApplied;
+    private ForegroundAppWatcher _foregroundWatcher = null!;
+    private bool _perAppActive;   // 按应用模式下，当前是否命中目标应用（前台）
+    private bool _perAppInit;     // 避免恢复状态时触发 UI 事件
 
     // 窗口激活后设置一次固定尺寸。参数顺序：(宽, 高)。
     // 仅在首次激活时设置一次，避免与 Windows 记录的窗口状态反复竞争。
@@ -138,7 +166,13 @@ public sealed partial class MainWindow : Window
 
     private void ApplyCurrent()
     {
-        if (EnableSwitch.IsOn)
+        // 实际是否应用滤镜：
+        //  - 总开关（EnableSwitch）关闭 → 必关
+        //  - 按应用模式开启 → 还需前台命中目标应用（_perAppActive）
+        bool shouldApply = EnableSwitch.IsOn &&
+                           (!_data.PerAppEnabled || _perAppActive);
+
+        if (shouldApply)
         {
             if (!FilterEngine.Apply(_data.Current))
                 StatusText.Text = "应用滤镜失败：" + FilterEngine.LastError;
@@ -149,12 +183,115 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // ---------------- 按应用切换滤镜 ----------------
+
+    private void StartPerAppWatching()
+    {
+        _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
+        _foregroundWatcher.Start(500);
+    }
+
+    private void StopPerAppWatching()
+    {
+        _foregroundWatcher.Stop();
+    }
+
+    private void ForegroundWatcher_MatchChanged(bool isMatch, string process, string title)
+    {
+        // watcher 在后台线程回调，需切回 UI 线程
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _perAppActive = isMatch;
+            UpdatePerAppStatus();
+            ApplyCurrent();
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        });
+    }
+
+    private void UpdatePerAppStatus()
+    {
+        if (PerAppStatus == null) return;
+        if (!_data.PerAppEnabled)
+        {
+            PerAppStatus.Text = "";
+            return;
+        }
+        string target = string.IsNullOrEmpty(_data.PerAppProcess)
+            ? (string.IsNullOrEmpty(_data.PerAppTitle) ? "(未设置)" : $"标题「{_data.PerAppTitle}」")
+            : $"进程 {_data.PerAppProcess}";
+        PerAppStatus.Text = _perAppActive
+            ? $"● 目标应用在前台，滤镜已启用（{target}）"
+            : $"○ 目标应用不在前台，滤镜已关闭（{target}）";
+    }
+
+    private void PerAppSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_perAppInit) return;
+        _data.PerAppEnabled = PerAppSwitch.IsOn;
+        if (_data.PerAppEnabled)
+        {
+            StartPerAppWatching();
+        }
+        else
+        {
+            StopPerAppWatching();
+            _perAppActive = false;
+        }
+        UpdatePerAppStatus();
+        ApplyCurrent();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    private void PerAppProcessBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_perAppInit) return;
+        _data.PerAppProcess = PerAppProcessBox.Text.Trim();
+        if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
+        SaveState();
+    }
+
+    private void PerAppTitleBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_perAppInit) return;
+        _data.PerAppTitle = PerAppTitleBox.Text.Trim();
+        if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
+        SaveState();
+    }
+
+    private void PickForegroundButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // 读取当前前台窗口的进程名与标题，填入输入框
+            IntPtr hwnd = ForegroundAppWatcher.GetForegroundWindowForPicker();
+            var (proc, title) = ForegroundAppWatcher.GetForegroundInfo(hwnd);
+            _perAppInit = true;
+            if (!string.IsNullOrEmpty(proc)) PerAppProcessBox.Text = proc;
+            if (!string.IsNullOrEmpty(title)) PerAppTitleBox.Text = title;
+            _perAppInit = false;
+            _data.PerAppProcess = PerAppProcessBox.Text.Trim();
+            _data.PerAppTitle = PerAppTitleBox.Text.Trim();
+            if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
+            SaveState();
+            UpdatePerAppStatus();
+        }
+        catch (Exception ex)
+        {
+            PerAppStatus.Text = "读取前台应用失败：" + ex.Message;
+        }
+    }
+
     private void SaveState()
     {
         _data.Current = _data.Current.Clone();
         _data.IsEnabled = EnableSwitch.IsOn;
         _data.Profiles = new List<Profile>(_profiles);
         _data.SelectedProfileIndex = ProfileList.SelectedIndex;
+        _data.PerAppEnabled = PerAppSwitch?.IsOn ?? _data.PerAppEnabled;
+        _data.PerAppProcess = PerAppProcessBox?.Text.Trim() ?? _data.PerAppProcess;
+        _data.PerAppTitle = PerAppTitleBox?.Text.Trim() ?? _data.PerAppTitle;
         _store.Save(_data);
     }
 
@@ -456,6 +593,7 @@ public sealed partial class MainWindow : Window
         _shutdownStarted = true;
 
         SaveState();
+        _foregroundWatcher?.Dispose();
         FilterEngine.Reset();
         FilterEngine.Shutdown();
         _hotkeys.Dispose();

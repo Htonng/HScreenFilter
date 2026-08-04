@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace HScreenFilter.Services;
@@ -80,6 +81,9 @@ public sealed class TrayIcon : IDisposable
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CopyIcon(IntPtr hIcon);
+
     private readonly MessageWindow _window;
     private NOTIFYICONDATA _nid;
     private bool _added;
@@ -127,6 +131,22 @@ public sealed class TrayIcon : IDisposable
 
     private IntPtr CreateTrayIcon()
     {
+        // 优先使用 assets/icon.ico 作为托盘图标。
+        try
+        {
+            var iconPath = Path.Combine(AppContext.BaseDirectory, "assets", "icon.ico");
+            if (File.Exists(iconPath))
+            {
+                using var icon = new Icon(iconPath);
+                // 复制句柄，避免随 using 被释放
+                return CopyIcon(icon.Handle);
+            }
+        }
+        catch
+        {
+            // 加载失败则回退到默认绘制
+        }
+
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
         {
