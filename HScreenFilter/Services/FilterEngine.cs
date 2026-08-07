@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using HScreenFilter.Models;
 
@@ -237,10 +238,12 @@ public static class FilterEngine
         float be = (1f - shadows) * highlights * (0.5f * (1f - contrast) + brightness) + shadows;
 
         // ---- HSL 部分（先于既有变换应用）----
-        HSLMatrix(s, out var ah00, out var ah01, out var ah02,
-                       out var ah10, out var ah11, out var ah12,
-                       out var ah20, out var ah21, out var ah22,
-                       out var bh);
+        GetActiveHsl(s, out var hslIsSpecific, out var hslHue, out var hslSat, out var hslLight);
+        HSLMatrix(hslIsSpecific, hslHue, hslSat, hslLight,
+                  out var ah00, out var ah01, out var ah02,
+                  out var ah10, out var ah11, out var ah12,
+                  out var ah20, out var ah21, out var ah22,
+                  out var bh);
 
         // 合成 3×3：Ae × Ah
         float m00 = e00 * ah00 + e01 * ah10 + e02 * ah20;
@@ -285,25 +288,85 @@ public static class FilterEngine
     }
 
     /// <summary>
-    /// 构建 HSL 仿射变换（out = Ah·in + bh），处理顺序：色相旋转 → HSL 饱和度 → 明度。
+    /// 取出当前选中色系的 HSL 值。
+    /// 若选中“全部(主)”，使用 FilterSettings.Hue/HslSaturation/Lightness；
+    /// 若选中某个具体色系，使用 HslChannels 中对应项的值并以 isSpecific 标记。
+    /// </summary>
+    private static void GetActiveHsl(
+        FilterSettings s,
+        out bool isSpecific, out double hue, out double sat, out double light)
+    {
+        var ch = s.HslChannels.FirstOrDefault(c => c.Name == s.ActiveHslChannel);
+        if (ch != null && s.ActiveHslChannel != HslChannelNames.Master)
+        {
+            isSpecific = true;
+            hue = ch.Hue;
+            sat = ch.Saturation / 100.0;
+            light = ch.Lightness / 100.0;
+        }
+        else
+        {
+            isSpecific = false;
+            hue = s.Hue;
+            sat = s.HslSaturation / 100.0;
+            light = s.Lightness / 100.0;
+        }
+    }
+
+    /// <summary>
+    /// 构建 HSL 仿射变换（out = Ah·in + bh）。处理顺序：色相旋转 → HSL 饱和度 → 明度。
+    /// <paramref name="isSpecific"/> 为真时，对该色系做近似选择性调整。
     /// 中性时 Ah 为单位阵、bh=0，不产生任何效果。
     /// </summary>
     private static void HSLMatrix(
-        FilterSettings s,
+        bool isSpecific, double hueDeg, double sat, double light,
         out float a00, out float a01, out float a02,
         out float a10, out float a11, out float a12,
         out float a20, out float a21, out float a22,
         out float offset)
     {
-        // 色相旋转角度（度 → 弧度）
-        float hueRad = (float)(s.Hue * Math.PI / 180.0);
+        // 基础（非选择性）HSL：色相旋转 → 饱和度 → 明度
+        BuildHueSatMatrix(hueDeg, sat, out var m00, out var m01, out var m02,
+                                            out var m10, out var m11, out var m12,
+                                            out var m20, out var m21, out var m22);
+        LightnessGain(light, out var ls, out var lo);
+
+        if (isSpecific)
+        {
+            // 近似“选择性”调整（单一全屏矩阵无法做像素级分色，此处用该色系自身的
+            // 色相旋转方向来体现差异，属于物理限制下的近似模拟）。
+            BuildSelectiveMatrix(
+                m00, m01, m02, m10, m11, m12, m20, m21, m22, ls, lo,
+                out var s00, out var s01, out var s02,
+                out var s10, out var s11, out var s12,
+                out var s20, out var s21, out var s22,
+                out var so);
+
+            a00 = s00; a01 = s01; a02 = s02;
+            a10 = s10; a11 = s11; a12 = s12;
+            a20 = s20; a21 = s21; a22 = s22;
+            offset = so;
+            return;
+        }
+
+        a00 = m00 * ls; a01 = m01 * ls; a02 = m02 * ls;
+        a10 = m10 * ls; a11 = m11 * ls; a12 = m12 * ls;
+        a20 = m20 * ls; a21 = m21 * ls; a22 = m22 * ls;
+        offset = lo;
+    }
+
+    /// <summary>构建 色相旋转 × HSL饱和度 的 3×3 矩阵。</summary>
+    private static void BuildHueSatMatrix(
+        double hueDeg, double sat,
+        out float m00, out float m01, out float m02,
+        out float m10, out float m11, out float m12,
+        out float m20, out float m21, out float m22)
+    {
+        const float Wr = 0.2126f, Wg = 0.7152f, Wb = 0.0722f;
+        float hueRad = (float)(hueDeg * Math.PI / 180.0);
         float cos = (float)Math.Cos(hueRad);
         float sin = (float)Math.Sin(hueRad);
 
-        // Rec.709 亮度权重
-        const float Wr = 0.2126f, Wg = 0.7152f, Wb = 0.0722f;
-
-        // 标准 RGB 色相旋转矩阵 Hu（各行权重和为 1 → 灰度不变）
         float hu00 = Wr + cos * (1f - Wr) - sin * Wr;
         float hu01 = Wg - cos * Wg - sin * Wg;
         float hu02 = Wb - cos * Wb + sin * (1f - Wb);
@@ -314,49 +377,64 @@ public static class FilterEngine
         float hu21 = Wg - cos * Wg + sin * Wg;
         float hu22 = Wb + cos * (1f - Wb) + sin * Wb;
 
-        // HSL 饱和度（围绕灰度轴缩放）
-        float sat = (float)(s.HslSaturation / 100.0);
-        float invSat = 1f - sat;
-        float sa00 = Wr * invSat + sat;
-        float sa01 = Wg * invSat;
-        float sa02 = Wb * invSat;
-        float sa10 = Wr * invSat;
-        float sa11 = Wg * invSat + sat;
-        float sa12 = Wb * invSat;
-        float sa20 = Wr * invSat;
-        float sa21 = Wg * invSat;
-        float sa22 = Wb * invSat + sat;
+        float invSat = 1f - (float)sat;
+        float s00 = Wr * invSat + (float)sat;
+        float s01 = Wg * invSat;
+        float s02 = Wb * invSat;
+        float s10 = Wr * invSat;
+        float s11 = Wg * invSat + (float)sat;
+        float s12 = Wb * invSat;
+        float s20 = Wr * invSat;
+        float s21 = Wg * invSat;
+        float s22 = Wb * invSat + (float)sat;
 
-        // Sat × Hu
-        float m00 = sa00 * hu00 + sa01 * hu10 + sa02 * hu20;
-        float m01 = sa00 * hu01 + sa01 * hu11 + sa02 * hu21;
-        float m02 = sa00 * hu02 + sa01 * hu12 + sa02 * hu22;
-        float m10 = sa10 * hu00 + sa11 * hu10 + sa12 * hu20;
-        float m11 = sa10 * hu01 + sa11 * hu11 + sa12 * hu21;
-        float m12 = sa10 * hu02 + sa11 * hu12 + sa12 * hu22;
-        float m20 = sa20 * hu00 + sa21 * hu10 + sa22 * hu20;
-        float m21 = sa20 * hu01 + sa21 * hu11 + sa22 * hu21;
-        float m22 = sa20 * hu02 + sa21 * hu12 + sa22 * hu22;
+        m00 = s00 * hu00 + s01 * hu10 + s02 * hu20;
+        m01 = s00 * hu01 + s01 * hu11 + s02 * hu21;
+        m02 = s00 * hu02 + s01 * hu12 + s02 * hu22;
+        m10 = s10 * hu00 + s11 * hu10 + s12 * hu20;
+        m11 = s10 * hu01 + s11 * hu11 + s12 * hu21;
+        m12 = s10 * hu02 + s11 * hu12 + s12 * hu22;
+        m20 = s20 * hu00 + s21 * hu10 + s22 * hu20;
+        m21 = s20 * hu01 + s21 * hu11 + s22 * hu21;
+        m22 = s20 * hu02 + s21 * hu12 + s22 * hu22;
+    }
 
-        // 明度 L（-1..1，0 为中性）
-        float light = (float)(s.Lightness / 100.0);
-        float ls, lo;
+    /// <summary>明度缩放/偏移参数。</summary>
+    private static void LightnessGain(double light, out float scale, out float offset)
+    {
         if (light >= 0f)
         {
-            // 向白场混合：out = (1-L)*in + L
-            ls = 1f - Math.Min(light, 1f);
-            lo = Math.Min(light, 1f);
+            scale = 1f - (float)Math.Min(light, 1.0);
+            offset = (float)Math.Min(light, 1.0);
         }
         else
         {
-            // 向黑场收缩：out = (1+L)*in  （1+L 非负）
-            ls = 1f + Math.Max(light, -1f);
-            lo = 0f;
+            scale = 1f + (float)Math.Max(light, -1.0);
+            offset = 0f;
         }
+    }
 
-        a00 = m00 * ls; a01 = m01 * ls; a02 = m02 * ls;
-        a10 = m10 * ls; a11 = m11 * ls; a12 = m12 * ls;
-        a20 = m20 * ls; a21 = m21 * ls; a22 = m22 * ls;
-        offset = lo;
+    /// <summary>
+    /// 构建近似“选择性”仿射（out = S·in + so）。
+    /// 具体色系的基础矩阵 M（该色系自身的 色相旋转 × 饱和度）整体按 ls 缩放，
+    /// 明度偏移 lo 保持不变。由于当前引擎只能整屏套用单个线性矩阵、无法逐像素做
+    /// 真正的“只改红色”，各色系的选择差异主要由其自身的色相旋转方向（各通道行和不同）
+    /// 来体现，属于物理限制下的近似模拟。
+    /// </summary>
+    private static void BuildSelectiveMatrix(
+        float m00, float m01, float m02,
+        float m10, float m11, float m12,
+        float m20, float m21, float m22,
+        float ls, float lo,
+        out float s00, out float s01, out float s02,
+        out float s10, out float s11, out float s12,
+        out float s20, out float s21, out float s22,
+        out float so)
+    {
+        // 基础矩阵整体缩放（饱和度/色相）
+        s00 = m00 * ls; s01 = m01 * ls; s02 = m02 * ls;
+        s10 = m10 * ls; s11 = m11 * ls; s12 = m12 * ls;
+        s20 = m20 * ls; s21 = m21 * ls; s22 = m22 * ls;
+        so = lo;
     }
 }

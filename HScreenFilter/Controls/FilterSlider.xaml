@@ -16,7 +16,8 @@
         <TextBlock Text="{x:Bind Header}" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
         <Grid Grid.Column="1">
-            <!-- 彩色渐变轨道：Photoshop 式颜色滑块（无 Spectrum 时隐藏） -->
+            <!-- 彩色渐变轨道：Photoshop 式颜色滑块（无 Spectrum 时隐藏）
+                 仅在有 Spectrum 时由代码把默认轨道设为透明，露出渐变；否则保持默认轨道。 -->
             <Border x:Name="SpectrumBar"
                     Height="8" CornerRadius="4"
                     VerticalAlignment="Center"
@@ -28,26 +29,21 @@
                     Maximum="{x:Bind Maximum}"
                     StepFrequency="1"
                     SnapsTo="StepValues"
-                    ValueChanged="Slider_ValueChanged">
-                <!-- 让默认轨道透明，露出其下方的彩色渐变 -->
-                <Slider.Resources>
-                    <SolidColorBrush x:Key="SliderTrackFill" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackFillPressed" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackFillDisabled" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackValueFill" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="Transparent"/>
-                    <SolidColorBrush x:Key="SliderTrackValueFillDisabled" Color="Transparent"/>
-                </Slider.Resources>
-            </Slider>
+                    ValueChanged="Slider_ValueChanged"/>
         </Grid>
 
-        <TextBlock x:Name="ValueText"
-                   Grid.Column="2"
-                   Text="0"
-                   TextAlignment="Right"
-                   VerticalAlignment="Center"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        <TextBox x:Name="ValueText"
+                 Grid.Column="2"
+                 Text="0"
+                 TextAlignment="Right"
+                 VerticalAlignment="Center"
+                 Width="52"
+                 Padding="4,2"
+                 FontSize="12"
+                 BorderThickness="0"
+                 Background="Transparent"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                 KeyDown="ValueText_KeyDown"
+                 LostFocus="ValueText_LostFocus"/>
     </Grid>
 </UserControl>

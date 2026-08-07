@@ -55,16 +55,20 @@
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Padding="24,4,24,8" Spacing="12">
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="16"
                                 Padding="20,16"
                                 Margin="0,0,0,12">
                            <StackPanel Spacing="12">
-                               <StackPanel Spacing="4">
-                                   <TextBlock Text="基础调节" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                   <TextBlock Text="拖动滑块即可实时调整滤镜的亮度、对比度、色彩和阴影表现。"
-                                              FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                               <StackPanel Orientation="Horizontal" Spacing="8">
+                                   <Border Width="4" Height="18" CornerRadius="2" VerticalAlignment="Center"
+                                           Background="{ThemeResource AccentFillColorDefaultBrush}"/>
+                                   <StackPanel Spacing="4">
+                                       <TextBlock Text="基础调节" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                       <TextBlock Text="拖动滑块即可实时调整滤镜的亮度、对比度、色彩和阴影表现。"
+                                                  FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                                   </StackPanel>
                                </StackPanel>
                                <StackPanel Spacing="12">
                                    <controls:FilterSlider x:Name="BrightnessSlider" Header="亮度 Brightness" Minimum="-100" Maximum="100"/>
@@ -88,17 +92,32 @@
                         </Border>
 
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1"
+                                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                                BorderThickness="2"
                                 CornerRadius="16"
                                 Padding="20,16"
                                 Margin="0,0,0,12">
                            <StackPanel Spacing="12">
                                <StackPanel Spacing="4">
-                                   <TextBlock Text="HSL 调色盘" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                   <TextBlock Text="像 Photoshop 一样按色相、饱和度、明度精确调整整体色彩。" 
+                                   <TextBlock Text="🎨 HSL 调色盘" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                   <TextBlock Text="像 Photoshop 一样，先选择要调整的色系，再分别精细调整其色相、饱和度、明度。"
                                               FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
                                </StackPanel>
+
+                               <!-- 色系选择：全部(主) / 红 / 黄 / 绿 / 青 / 蓝 / 品红 -->
+                               <ComboBox x:Name="HslChannelCombo"
+                                         Header="选择色系（子菜单）"
+                                         SelectionChanged="HslChannelCombo_SelectionChanged"
+                                         HorizontalAlignment="Stretch">
+                                   <ComboBoxItem Content="全部（主）" Tag="全部"/>
+                                   <ComboBoxItem Content="红 Red" Tag="红"/>
+                                   <ComboBoxItem Content="黄 Yellow" Tag="黄"/>
+                                   <ComboBoxItem Content="绿 Green" Tag="绿"/>
+                                   <ComboBoxItem Content="青 Cyan" Tag="青"/>
+                                   <ComboBoxItem Content="蓝 Blue" Tag="蓝"/>
+                                   <ComboBoxItem Content="品红 Magenta" Tag="品红"/>
+                               </ComboBox>
+
                                <StackPanel Spacing="12">
                                    <controls:FilterSlider x:Name="HueSlider" Header="色相 Hue" Minimum="-180" Maximum="180"
                                                           Spectrum="#FF0000,#FFFF00,#00FF00,#00FFFF,#0000FF,#FF00FF,#FF0000"/>
@@ -107,6 +126,11 @@
                                    <controls:FilterSlider x:Name="LightnessSlider" Header="明度 Lightness" Minimum="-100" Maximum="100"
                                                           Spectrum="#000000,#808080,#FFFFFF"/>
                                </StackPanel>
+
+                               <TextBlock x:Name="HslChannelHint" FontSize="11"
+                                          Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                          TextWrapping="Wrap"
+                                          Text="提示：当前引擎为整屏单矩阵，具体色系的调整是对全局的近似模拟，主次效果按所选色系体现。"/>
                            </StackPanel>
                         </Border>
 
@@ -117,10 +141,14 @@
                                 Padding="20,16"
                                 Margin="0,0,0,12">
                            <StackPanel Spacing="10">
-                               <StackPanel Spacing="4">
-                                   <TextBlock Text="按应用切换滤镜" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                   <TextBlock Text="让滤镜只在指定应用前台时启用，切到其它窗口时自动关闭。"
-                                              FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                               <StackPanel Orientation="Horizontal" Spacing="8">
+                                   <Border Width="4" Height="18" CornerRadius="2" VerticalAlignment="Center"
+                                           Background="#1F9E6C"/>
+                                   <StackPanel Spacing="4">
+                                       <TextBlock Text="按应用切换滤镜" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                       <TextBlock Text="让滤镜只在指定应用前台时启用，切到其它窗口时自动关闭。"
+                                                  FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                                   </StackPanel>
                                </StackPanel>
                                <ToggleSwitch x:Name="PerAppSwitch" Header="启用按应用切换"
                                              OnContent="已启用" OffContent="已关闭"
@@ -159,10 +187,14 @@
                     Padding="20,16"
                     Margin="24,0,24,16">
                 <StackPanel Spacing="10">
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="配置与快捷键" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                        <TextBlock Text="保存多套滤镜配置，快速切换并绑定全局快捷键。"
-                                  FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Border Width="4" Height="18" CornerRadius="2" VerticalAlignment="Center"
+                                Background="#B060E0"/>
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="配置与快捷键" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="保存多套滤镜配置，快速切换并绑定全局快捷键。"
+                                      FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                        </StackPanel>
                     </StackPanel>
 
                     <ListView x:Name="ProfileList" Height="104" SelectionMode="Single"

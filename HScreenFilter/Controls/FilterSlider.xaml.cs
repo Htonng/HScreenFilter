@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -75,8 +76,7 @@ public sealed partial class FilterSlider : UserControl
     {
         var c = (FilterSlider)d;
         c.Slider.Value = (double)e.NewValue;
-        if (c.ValueText != null)
-            c.ValueText.Text = Math.Round((double)e.NewValue).ToString();
+        c.RefreshValueText();
     }
 
     private static void OnSpectrumPropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -102,10 +102,47 @@ public sealed partial class FilterSlider : UserControl
     private void Slider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (_internal) return;
-        if (ValueText != null)
-            ValueText.Text = Math.Round(e.NewValue).ToString();
+        RefreshValueText();
         Value = e.NewValue;
         ValueChangedExternal?.Invoke(this, e.NewValue);
+    }
+
+    /// <summary>刷新数值显示；当用户正在编辑输入框时不覆盖，避免打断输入。</summary>
+    private void RefreshValueText()
+    {
+        if (ValueText == null) return;
+        if (ValueText.FocusState == FocusState.Unfocused)
+            ValueText.Text = Math.Round(Value).ToString();
+    }
+
+    // 直接在数值框输入并回车：把输入提交为合法数值。
+    private void ValueText_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            CommitValueText();
+            e.Handled = true;
+        }
+    }
+
+    // 失焦时提交；若输入非法则回退为当前值。
+    private void ValueText_LostFocus(object sender, RoutedEventArgs e)
+    {
+        CommitValueText();
+    }
+
+    private void CommitValueText()
+    {
+        if (ValueText == null) return;
+        if (double.TryParse(ValueText.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed))
+        {
+            parsed = Math.Clamp(parsed, Minimum, Maximum);
+            if (_internal) return; // 防止回环
+            Value = parsed;
+            ValueChangedExternal?.Invoke(this, parsed);
+            Slider.Value = parsed;
+        }
+        RefreshValueText();
     }
 
     private void ApplySpectrum(string? spectrum)
@@ -134,11 +171,32 @@ public sealed partial class FilterSlider : UserControl
                 brush.GradientStops.Add(stop);
             SpectrumBar.Background = brush;
             SpectrumBar.Visibility = Visibility.Visible;
+            MakeTrackTransparent(true);
         }
         else
         {
             SpectrumBar.Background = null;
             SpectrumBar.Visibility = Visibility.Collapsed;
+            MakeTrackTransparent(false);
+        }
+    }
+
+    // 有彩色渐变时把默认滑块轨道设为透明以露出渐变；无渐变时移除覆盖，恢复默认轨道。
+    private static readonly string[] TrackBrushKeys =
+    {
+        "SliderTrackFill", "SliderTrackFillPointerOver", "SliderTrackFillPressed", "SliderTrackFillDisabled",
+        "SliderTrackValueFill", "SliderTrackValueFillPointerOver", "SliderTrackValueFillPressed", "SliderTrackValueFillDisabled",
+    };
+
+    private void MakeTrackTransparent(bool transparent)
+    {
+        var transparentBrush = transparent ? new SolidColorBrush(Colors.Transparent) : null;
+        foreach (var key in TrackBrushKeys)
+        {
+            if (transparentBrush != null)
+                Slider.Resources[key] = transparentBrush;
+            else
+                Slider.Resources.Remove(key);
         }
     }
 

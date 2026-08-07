@@ -90,9 +90,9 @@ public sealed partial class MainWindow : Window
         HighlightSlider.ValueChangedExternal += (_, v) => { _data.Current.Highlights = v; ScheduleApply(); };
         ShadowSlider.ValueChangedExternal += (_, v) => { _data.Current.Shadows = v; ScheduleApply(); };
         TemperatureSlider.ValueChangedExternal += (_, v) => { _data.Current.Temperature = v; ScheduleApply(); };
-        HueSlider.ValueChangedExternal += (_, v) => { _data.Current.Hue = v; ScheduleApply(); };
-        HslSaturationSlider.ValueChangedExternal += (_, v) => { _data.Current.HslSaturation = v; ScheduleApply(); };
-        LightnessSlider.ValueChangedExternal += (_, v) => { _data.Current.Lightness = v; ScheduleApply(); };
+        HueSlider.ValueChangedExternal += (_, v) => { SetActiveHsl(hsl => hsl.Hue = v); ScheduleApply(); };
+        HslSaturationSlider.ValueChangedExternal += (_, v) => { SetActiveHsl(hsl => hsl.Saturation = v); ScheduleApply(); };
+        LightnessSlider.ValueChangedExternal += (_, v) => { SetActiveHsl(hsl => hsl.Lightness = v); ScheduleApply(); };
 
         LoadSettingsIntoUi(_data.Current);
 
@@ -309,9 +309,89 @@ public sealed partial class MainWindow : Window
         HighlightSlider.SetValueSilently(s.Highlights);
         ShadowSlider.SetValueSilently(s.Shadows);
         TemperatureSlider.SetValueSilently(s.Temperature);
-        HueSlider.SetValueSilently(s.Hue);
-        HslSaturationSlider.SetValueSilently(s.HslSaturation);
-        LightnessSlider.SetValueSilently(s.Lightness);
+
+        // 同步色系下拉到当前活动色系
+        SyncHslChannelCombo(s.ActiveHslChannel);
+        // 加载当前活动色系的 HSL 值
+        LoadActiveChannelHsl(s);
+    }
+
+    /// <summary>把 ComboBox 选中项同步为给定色系名。</summary>
+    private void SyncHslChannelCombo(string channelName)
+    {
+        foreach (var item in HslChannelCombo.Items)
+        {
+            if (item is ComboBoxItem cbi && cbi.Tag?.ToString() == channelName)
+            {
+                HslChannelCombo.SelectedItem = item;
+                break;
+            }
+        }
+    }
+
+    /// <summary>取出当前活动色系；若无则补一个默认项。</summary>
+    private HslChannel GetActiveChannel(FilterSettings s)
+    {
+        var ch = s.HslChannels.FirstOrDefault(c => c.Name == s.ActiveHslChannel);
+        if (ch == null)
+        {
+            ch = new HslChannel { Name = s.ActiveHslChannel };
+            s.HslChannels.Add(ch);
+        }
+        return ch;
+    }
+
+    /// <summary>把当前活动色系（全部=主标量）的 HSL 写入 its 回调。</summary>
+    private void SetActiveHsl(Action<HslChannel> action)
+    {
+        var s = _data.Current;
+        if (s.ActiveHslChannel == HslChannelNames.Master)
+        {
+            // 主通道直接映射到主标量
+            var m = new HslChannel { Hue = s.Hue, Saturation = s.HslSaturation, Lightness = s.Lightness };
+            action(m);
+            s.Hue = m.Hue;
+            s.HslSaturation = m.Saturation;
+            s.Lightness = m.Lightness;
+        }
+        else
+        {
+            action(GetActiveChannel(s));
+        }
+        ScheduleApply();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>把当前活动色系（全部=主标量）的 HSL 加载到三个滑块。</summary>
+    private void LoadActiveChannelHsl(FilterSettings s)
+    {
+        var ch = GetActiveChannel(s);
+        if (ch.Name == HslChannelNames.Master)
+        {
+            HueSlider.SetValueSilently(s.Hue);
+            HslSaturationSlider.SetValueSilently(s.HslSaturation);
+            LightnessSlider.SetValueSilently(s.Lightness);
+        }
+        else
+        {
+            HueSlider.SetValueSilently(ch.Hue);
+            HslSaturationSlider.SetValueSilently(ch.Saturation);
+            LightnessSlider.SetValueSilently(ch.Lightness);
+        }
+    }
+
+    // 切换色系：更新活动色系并加载该色系的 HSL 值
+    private void HslChannelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (HslChannelCombo.SelectedItem is ComboBoxItem cbi && cbi.Tag is string name)
+        {
+            _data.Current.ActiveHslChannel = name;
+            LoadActiveChannelHsl(_data.Current);
+            ScheduleApply();
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        }
     }
 
     // ---------------- 开关与预设 ----------------
