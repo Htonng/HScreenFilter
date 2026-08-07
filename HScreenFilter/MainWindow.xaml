@@ -93,6 +93,29 @@
                                 CornerRadius="16"
                                 Padding="20,16"
                                 Margin="0,0,0,12">
+                           <StackPanel Spacing="12">
+                               <StackPanel Spacing="4">
+                                   <TextBlock Text="HSL 调色盘" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                   <TextBlock Text="像 Photoshop 一样按色相、饱和度、明度精确调整整体色彩。" 
+                                              FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                               </StackPanel>
+                               <StackPanel Spacing="12">
+                                   <controls:FilterSlider x:Name="HueSlider" Header="色相 Hue" Minimum="-180" Maximum="180"
+                                                          Spectrum="#FF0000,#FFFF00,#00FF00,#00FFFF,#0000FF,#FF00FF,#FF0000"/>
+                                   <controls:FilterSlider x:Name="HslSaturationSlider" Header="饱和度 Saturation" Minimum="0" Maximum="200"
+                                                          Spectrum="#808080,#FF0000"/>
+                                   <controls:FilterSlider x:Name="LightnessSlider" Header="明度 Lightness" Minimum="-100" Maximum="100"
+                                                          Spectrum="#000000,#808080,#FFFFFF"/>
+                               </StackPanel>
+                           </StackPanel>
+                        </Border>
+
+                        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="16"
+                                Padding="20,16"
+                                Margin="0,0,0,12">
                            <StackPanel Spacing="10">
                                <StackPanel Spacing="4">
                                    <TextBlock Text="按应用切换滤镜" Style="{StaticResource BodyStrongTextBlockStyle}"/>

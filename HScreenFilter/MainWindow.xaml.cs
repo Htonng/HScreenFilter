@@ -78,6 +78,9 @@ public sealed partial class MainWindow : Window
         {
             SaturationSlider.IsEnabled = false;
             SaturationSlider.Header = "鲜艳度 Saturation（当前引擎不支持）";
+            HueSlider.IsEnabled = false;
+            HslSaturationSlider.IsEnabled = false;
+            LightnessSlider.IsEnabled = false;
         }
 
         // 滑块事件
@@ -87,6 +90,9 @@ public sealed partial class MainWindow : Window
         HighlightSlider.ValueChangedExternal += (_, v) => { _data.Current.Highlights = v; ScheduleApply(); };
         ShadowSlider.ValueChangedExternal += (_, v) => { _data.Current.Shadows = v; ScheduleApply(); };
         TemperatureSlider.ValueChangedExternal += (_, v) => { _data.Current.Temperature = v; ScheduleApply(); };
+        HueSlider.ValueChangedExternal += (_, v) => { _data.Current.Hue = v; ScheduleApply(); };
+        HslSaturationSlider.ValueChangedExternal += (_, v) => { _data.Current.HslSaturation = v; ScheduleApply(); };
+        LightnessSlider.ValueChangedExternal += (_, v) => { _data.Current.Lightness = v; ScheduleApply(); };
 
         LoadSettingsIntoUi(_data.Current);
 
@@ -303,6 +309,9 @@ public sealed partial class MainWindow : Window
         HighlightSlider.SetValueSilently(s.Highlights);
         ShadowSlider.SetValueSilently(s.Shadows);
         TemperatureSlider.SetValueSilently(s.Temperature);
+        HueSlider.SetValueSilently(s.Hue);
+        HslSaturationSlider.SetValueSilently(s.HslSaturation);
+        LightnessSlider.SetValueSilently(s.Lightness);
     }
 
     // ---------------- 开关与预设 ----------------

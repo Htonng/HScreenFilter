@@ -15,14 +15,33 @@
 
         <TextBlock Text="{x:Bind Header}" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
-        <Slider x:Name="Slider"
-                Grid.Column="1"
-                VerticalAlignment="Center"
-                Minimum="{x:Bind Minimum}"
-                Maximum="{x:Bind Maximum}"
-                StepFrequency="1"
-                SnapsTo="StepValues"
-                ValueChanged="Slider_ValueChanged"/>
+        <Grid Grid.Column="1">
+            <!-- 彩色渐变轨道：Photoshop 式颜色滑块（无 Spectrum 时隐藏） -->
+            <Border x:Name="SpectrumBar"
+                    Height="8" CornerRadius="4"
+                    VerticalAlignment="Center"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed"/>
+            <Slider x:Name="Slider"
+                    VerticalAlignment="Center"
+                    Minimum="{x:Bind Minimum}"
+                    Maximum="{x:Bind Maximum}"
+                    StepFrequency="1"
+                    SnapsTo="StepValues"
+                    ValueChanged="Slider_ValueChanged">
+                <!-- 让默认轨道透明，露出其下方的彩色渐变 -->
+                <Slider.Resources>
+                    <SolidColorBrush x:Key="SliderTrackFill" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackFillPressed" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackFillDisabled" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackValueFill" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="Transparent"/>
+                    <SolidColorBrush x:Key="SliderTrackValueFillDisabled" Color="Transparent"/>
+                </Slider.Resources>
+            </Slider>
+        </Grid>
 
         <TextBlock x:Name="ValueText"
                    Grid.Column="2"
