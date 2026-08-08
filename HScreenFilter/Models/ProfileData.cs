@@ -8,6 +8,9 @@ public class ProfileData
     public List<Profile> Profiles { get; set; } = new();
     public int SelectedProfileIndex { get; set; } = -1;
 
+    /// <summary>当前处于激活状态（开关打开）的配置索引；-1 表示没有激活（此时改动保存至临时配置，下次启动恢复默认）。</summary>
+    public int ActiveProfileIndex { get; set; } = -1;
+
     public int GlobalModifiers { get; set; }
     public int GlobalKey { get; set; }
     public string GlobalDisplay { get; set; } = "";

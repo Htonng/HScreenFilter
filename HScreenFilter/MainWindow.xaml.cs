@@ -2,12 +2,18 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
+using Windows.Storage.Pickers;
 using Windows.System;
 using HScreenFilter.Controls;
 using HScreenFilter.Models;
@@ -26,6 +32,7 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<Profile, int> _profileHotkeyIds = new();
     private readonly DispatcherQueueTimer _applyTimer;
     private readonly DispatcherQueueTimer _saveTimer;
+    private readonly DispatcherQueueTimer _hintTimer;
     private bool _uiInit;   // 避免恢复置顶/可捕获开关状态时触发 UI 事件
     private TrayIcon? _tray;
     private Profile? _capturingFor;
@@ -33,6 +40,23 @@ public sealed partial class MainWindow : Window
     private bool _closingToTray = true;
     private bool _shutdownStarted;
     private int _globalHotkeyId;
+    private bool _pendingEdit;       // 配置数据已改变，保存条正在显示（等待用户保存/取消）
+    private bool _profileToggleInit; // 避免恢复/互斥切换开关时触发 UI 事件
+    private Popup? _saveBar;         // 底部“是否保存”条
+    private Border? _saveBarBorder;  // 保存条主体（用于上浮动画）
+    private FilterSettings _savedSnapshot = new(); // 最近一次已提交（可回滚）的配置快照
+    private Profile? _dragProfile;   // 拖拽排序：当前被拖动的配置
+    private static readonly JsonSerializerOptions _profileJson = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+    };
+
+    /// <summary>当前处于激活状态（开关打开）的配置；没有则返回 null（此时为临时配置）。</summary>
+    private Profile? ActiveProfile =>
+        _data.ActiveProfileIndex >= 0 && _data.ActiveProfileIndex < _profiles.Count
+            ? _profiles[_data.ActiveProfileIndex]
+            : null;
 
     public MainWindow()
     {
@@ -62,6 +86,12 @@ public sealed partial class MainWindow : Window
         _saveTimer.Interval = TimeSpan.FromMilliseconds(400);
         _saveTimer.IsRepeating = false;
         _saveTimer.Tick += (_, _) => SaveState();
+
+        // 快捷键设置提示：10 秒后自动清空
+        _hintTimer = dq.CreateTimer();
+        _hintTimer.Interval = TimeSpan.FromSeconds(10);
+        _hintTimer.IsRepeating = false;
+        _hintTimer.Tick += (_, _) => { CaptureHint.Text = ""; GlobalCaptureHint.Text = ""; };
 
         // 恢复已保存状态
         _data = _store.Load();
@@ -102,6 +132,20 @@ public sealed partial class MainWindow : Window
         foreach (var (slider, channel, field) in AllHslSliders())
             WireHslSlider(slider, channel, field);
 
+        // 恢复上次激活的配置（开关 n 选 1）：有则加载其设置；无则用临时配置（下次启动恢复默认）
+        if (_data.ActiveProfileIndex >= 0 && _data.ActiveProfileIndex < _profiles.Count)
+        {
+            _profileToggleInit = true;
+            _profiles[_data.ActiveProfileIndex].IsActive = true;
+            _profileToggleInit = false;
+            _data.Current = _profiles[_data.ActiveProfileIndex].Settings.Clone();
+        }
+        else
+        {
+            _data.Current = new FilterSettings();
+        }
+        _savedSnapshot = _data.Current.Clone();
+
         LoadSettingsIntoUi(_data.Current);
 
         ProfileList.ItemsSource = _profiles;
@@ -130,7 +174,22 @@ public sealed partial class MainWindow : Window
             RegisterProfileHotkey(p);
         RegisterGlobalToggle();
 
-        _tray = new TrayIcon(_msgWindow, ShowMainWindow, OnTrayExit);
+        _tray = new TrayIcon(_msgWindow, ShowMainWindow, OnTrayExit)
+        {
+            // 右键托盘菜单显示配置列表，当前生效（激活）的配置前打勾
+            ProfilesProvider = () =>
+            {
+                var items = new (string Name, bool IsActive)[_profiles.Count];
+                for (int i = 0; i < _profiles.Count; i++)
+                    items[i] = (_profiles[i].Name, _profiles[i].IsActive);
+                return items;
+            },
+            ProfileSelected = index =>
+            {
+                if (index >= 0 && index < _profiles.Count)
+                    ApplyProfile(_profiles[index]);
+            },
+        };
         _tray.Show();
 
         Closed += MainWindow_Closed;
@@ -228,10 +287,10 @@ public sealed partial class MainWindow : Window
     /// <summary>应用 UI 置顶 + 可捕获两个开关：
     ///   置顶开关（UiTopmostSwitch）：UI 是否置顶（盖在滤镜覆盖层之上，否则被覆盖层挡住看不见）；
     ///   可捕获开关（CaptureSwitch）：UI 与滤镜层是否可被 OBS 等屏幕捕获。
-    ///     可捕获开 → UI 与覆盖层设 WDA_MONITOR：仅从 DXGI Desktop Duplication 排除
-    ///                 （覆盖层自捕获看不到自己/UI = 防自反馈 + 防 UI 重影），
-    ///                 但 OBS（WGC 显示器捕获 / 窗口捕获 BitBlt）仍可见，滤镜效果可被录制。
-    ///     可捕获关 → WDA_EXCLUDEFROMCAPTURE（从一切捕获排除，颜色不受滤镜影响）。</summary>
+    ///     可捕获开 → UI 设 WDA_NONE（完全可被捕获，包括 DXGI 截屏/截图，不再防二次捕获），
+    ///                覆盖层设 WDA_MONITOR（仅从 DXGI 自捕获排除 = 防自反馈，但 WGC/BitBlt 仍可见）；
+    ///                这样 Win+Shift+S / 基于 DXGI 的截图、OBS（WGC/窗口捕获）都能录到 UI 与滤镜效果。
+    ///     可捕获关 → UI 与覆盖层都 WDA_EXCLUDEFROMCAPTURE（从一切捕获排除，颜色不受滤镜影响）。</summary>
     private void TryEnsureUiTopmost()
     {
         try
@@ -249,10 +308,12 @@ public sealed partial class MainWindow : Window
             catch { }
 
             // UI 窗口（WinUI 3 有内外两层，需都设置；跳过滤镜覆盖层）
+            // 可捕获开 → WDA_NONE：UI 完全可被捕获（含 DXGI），避免基于 DXGI 的截屏/截图看不到 UI。
+            // 可捕获关 → WDA_EXCLUDEFROMCAPTURE：从一切捕获排除。
             ForEachOwnWindow(h =>
             {
                 OverlayNative.SetWindowDisplayAffinity(h,
-                    cap ? OverlayNative.WDA_MONITOR : OverlayNative.WDA_EXCLUDEFROMCAPTURE);
+                    cap ? OverlayNative.WDA_NONE : OverlayNative.WDA_EXCLUDEFROMCAPTURE);
                 // 分层/WinUI 窗口仅 SetWindowPos 置顶无效，需改 WS_EX_TOPMOST 样式位
                 OverlayNative.SetTopmost(h, top);
             });
@@ -310,10 +371,17 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>阻止鼠标滚轮切换界面主题（避免滚动页面时误触 ComboBox 换主题）。</summary>
+    private void ThemeComboBox_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
     // ---------------- 滤镜应用 ----------------
 
     private void ScheduleApply()
     {
+        MarkFilterChanged();
         _applyTimer.Stop();
         _applyTimer.Start();
         _saveTimer.Stop();
@@ -709,6 +777,7 @@ public sealed partial class MainWindow : Window
     {
         _data.Current = _data.Current.Clone();
         _data.IsEnabled = EnableSwitch.IsOn;
+        _data.ActiveProfileIndex = ActiveProfile is { } ap ? _profiles.IndexOf(ap) : -1;
         _data.Profiles = new List<Profile>(_profiles);
         _data.SelectedProfileIndex = ProfileList.SelectedIndex;
         _data.PerAppEnabled = PerAppSwitch?.IsOn ?? _data.PerAppEnabled;
@@ -895,6 +964,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplyPreset(FilterSettings preset)
     {
+        MarkFilterChanged();
         _data.Current = preset.Clone();
         LoadSettingsIntoUi(_data.Current);
         ApplyCurrent();
@@ -915,19 +985,6 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
-    private void UpdateProfile_Click(object sender, RoutedEventArgs e)
-    {
-        if (ProfileList.SelectedItem is not Profile p) return;
-        p.Settings = _data.Current.Clone();
-        SaveState();
-    }
-
-    private void ApplyProfile_Click(object sender, RoutedEventArgs e)
-    {
-        if (ProfileList.SelectedItem is not Profile p) return;
-        ApplyProfile(p);
-    }
-
     private void DeleteProfile_Click(object sender, RoutedEventArgs e)
     {
         if (ProfileList.SelectedItem is not Profile p) return;
@@ -936,6 +993,7 @@ public sealed partial class MainWindow : Window
             _hotkeys.Unregister(id);
             _profileHotkeyIds.Remove(p);
         }
+        bool wasActive = ReferenceEquals(ActiveProfile, p);
         int removedIndex = _profiles.IndexOf(p);
         _profiles.Remove(p);
         // 清理/修正按应用绑定中指向被删配置的引用
@@ -943,6 +1001,21 @@ public sealed partial class MainWindow : Window
         {
             if (b.ProfileIndex == removedIndex) b.ProfileIndex = -1;
             else if (b.ProfileIndex > removedIndex) b.ProfileIndex--;
+        }
+        // 删除的是激活配置 → 回到临时配置（默认）；否则修正激活索引
+        if (wasActive)
+        {
+            _profileToggleInit = true;
+            foreach (var x in _profiles) x.IsActive = false;
+            _profileToggleInit = false;
+            _data.ActiveProfileIndex = -1;
+            _data.Current = new FilterSettings();
+            LoadSettingsIntoUi(_data.Current);
+            ApplyCurrent();
+        }
+        else if (_data.ActiveProfileIndex > removedIndex)
+        {
+            _data.ActiveProfileIndex--;
         }
         RefreshBindingList();
         SaveState();
@@ -971,15 +1044,315 @@ public sealed partial class MainWindow : Window
         return result == ContentDialogResult.Primary ? box.Text.Trim() : null;
     }
 
+    /// <summary>重命名所选配置。</summary>
+    private async void RenameProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProfileList.SelectedItem is not Profile p) return;
+        var name = await PromptNameAsync("重命名配置", "配置名称", p.Name);
+        if (string.IsNullOrEmpty(name)) return;
+        p.Name = name;
+        RefreshBindingList();
+        SaveState();
+    }
+
+    /// <summary>导入配置：从 JSON 文件读取滤镜设置并新建一个配置。</summary>
+    private async void ImportProfile_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+        picker.FileTypeFilter.Add(".json");
+        InitFilePicker(picker);
+        var file = await picker.PickSingleFileAsync();
+        if (file == null) return;
+        try
+        {
+            var json = await FileIO.ReadTextAsync(file);
+            var settings = JsonSerializer.Deserialize<FilterSettings>(json, _profileJson);
+            if (settings == null) throw new Exception("文件内容为空或格式不正确");
+            var name = Path.GetFileNameWithoutExtension(file.Name);
+            var profile = new Profile { Name = name, Settings = settings };
+            _profiles.Add(profile);
+            ProfileList.SelectedItem = profile;
+            RefreshBindingList();
+            SaveState();
+            StatusText.Text = $"已导入配置「{name}」";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "导入配置失败：" + ex.Message;
+        }
+    }
+
+    /// <summary>导出所选配置：把滤镜设置保存为 JSON 文件。</summary>
+    private async void ExportProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProfileList.SelectedItem is not Profile p) return;
+        var picker = new FileSavePicker
+        {
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            SuggestedFileName = p.Name,
+        };
+        picker.FileTypeChoices.Add("HScreenFilter 配置", new List<string> { ".json" });
+        InitFilePicker(picker);
+        var file = await picker.PickSaveFileAsync();
+        if (file == null) return;
+        try
+        {
+            await FileIO.WriteTextAsync(file, JsonSerializer.Serialize(p.Settings, _profileJson));
+            StatusText.Text = $"已导出配置「{p.Name}」";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "导出配置失败：" + ex.Message;
+        }
+    }
+
+    private void InitFilePicker<T>(T picker) where T : class
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+    }
+
+    // ---------------- 拖拽排序 ----------------
+
+    private void ProfileList_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
+    {
+        _dragProfile = e.Items.Count > 0 ? e.Items[0] as Profile : null;
+        e.Data.RequestedOperation = DataPackageOperation.Move;
+    }
+
+    private void ProfileList_DragOver(object sender, DragEventArgs e)
+    {
+        e.AcceptedOperation = DataPackageOperation.Move;
+        if (e.DragUIOverride != null)
+        {
+            e.DragUIOverride.Caption = "移动配置";
+            e.DragUIOverride.IsCaptionVisible = true;
+        }
+    }
+
+    private void ProfileList_Drop(object sender, DragEventArgs e)
+    {
+        if (_dragProfile == null) return;
+        int oldIndex = _profiles.IndexOf(_dragProfile);
+        if (oldIndex < 0) { _dragProfile = null; return; }
+
+        // 找释放位置对应的目标索引（落在某行上半部则插到该行之前，否则末尾）
+        var pos = e.GetPosition(ProfileList);
+        int target = _profiles.Count;
+        for (int i = 0; i < _profiles.Count; i++)
+        {
+            if (ProfileList.ContainerFromIndex(i) is not FrameworkElement c) continue;
+            var topLeft = c.TransformToVisual(ProfileList).TransformPoint(new Windows.Foundation.Point(0, 0));
+            if (pos.Y < topLeft.Y + c.ActualHeight / 2)
+            {
+                target = i;
+                break;
+            }
+        }
+        if (target == oldIndex) { _dragProfile = null; return; }
+
+        // 记录每个按应用绑定当前指向的配置对象（重排后按对象重新映射索引）
+        var bound = new Profile?[_data.AppBindings.Count];
+        for (int i = 0; i < _data.AppBindings.Count; i++)
+        {
+            var b = _data.AppBindings[i];
+            bound[i] = b.ProfileIndex >= 0 && b.ProfileIndex < _profiles.Count ? _profiles[b.ProfileIndex] : null;
+        }
+
+        _profiles.Move(oldIndex, target);
+
+        // 重新映射按应用绑定索引
+        for (int i = 0; i < _data.AppBindings.Count; i++)
+        {
+            var profile = bound[i];
+            _data.AppBindings[i].ProfileIndex = profile == null ? -1 : _profiles.IndexOf(profile);
+        }
+
+        // 修正激活配置索引（按对象）
+        var activeProfile = _profiles.FirstOrDefault(p => p.IsActive);
+        _data.ActiveProfileIndex = activeProfile == null ? -1 : _profiles.IndexOf(activeProfile);
+
+        RefreshBindingList();
+        SaveState();
+        _dragProfile = null;
+    }
+
     private void ApplyProfile(Profile profile)
     {
-        DispatcherQueue.TryEnqueue(() =>
+        DispatcherQueue.TryEnqueue(() => SetActiveProfileAndApply(profile));
+    }
+
+    // ---------------- 配置开关（n 选 1）+ 自动保存 ----------------
+
+    /// <summary>列表里配置开关的 Toggled：开=应用该配置，关=回到临时配置（默认）。</summary>
+    private void ProfileActiveToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_profileToggleInit) return;
+        if (sender is not ToggleSwitch toggle) return;
+        if (toggle.DataContext is not Profile profile) return;
+        if (toggle.IsOn) ActivateProfile(profile);
+        else DeactivateProfile();
+    }
+
+    /// <summary>激活某配置：n 选 1（其它配置开关自动关闭），并应用其滤镜设置。
+    /// 无论通过列表开关、快捷键还是外部调用，都统一走这里，保证开关显示与当前生效配置同步。</summary>
+    private void SetActiveProfileAndApply(Profile profile)
+    {
+        _profileToggleInit = true;
+        foreach (var p in _profiles)
+            p.IsActive = ReferenceEquals(p, profile);
+        _profileToggleInit = false;
+
+        _data.ActiveProfileIndex = _profiles.IndexOf(profile);
+        _data.Current = profile.Settings.Clone();
+        _savedSnapshot = _data.Current.Clone();
+        _pendingEdit = false;
+        HideSaveBar();
+        LoadSettingsIntoUi(_data.Current);
+        ApplyCurrent();
+        SaveState();
+    }
+
+    private void ActivateProfile(Profile profile) => SetActiveProfileAndApply(profile);
+
+    /// <summary>关闭当前激活配置 → 无激活配置，改动进入临时配置（下次启动恢复默认）。</summary>
+    private void DeactivateProfile()
+    {
+        _profileToggleInit = true;
+        foreach (var p in _profiles)
+            p.IsActive = false;
+        _profileToggleInit = false;
+
+        _data.ActiveProfileIndex = -1;
+        _data.Current = new FilterSettings();
+        _savedSnapshot = _data.Current.Clone();
+        _pendingEdit = false;
+        HideSaveBar();
+        LoadSettingsIntoUi(_data.Current);
+        ApplyCurrent();
+        SaveState();
+    }
+
+    /// <summary>配置数据首次发生改变 → 弹出底部保存条（“配置发生改变，是否保存？”）。</summary>
+    private void MarkFilterChanged()
+    {
+        if (_pendingEdit) return;
+        _pendingEdit = true;
+        ShowSaveBar();
+    }
+
+    /// <summary>从下方浮出条状保存浮窗：蓝色“保存”按钮 + 白色“取消”按钮。</summary>
+    private void ShowSaveBar()
+    {
+        EnsureSaveBar();
+        if (_saveBar == null) return;
+        var size = RootGrid.XamlRoot.Size;
+        _saveBar.HorizontalOffset = Math.Max(0, (size.Width - 440) / 2);
+        _saveBar.VerticalOffset = Math.Max(0, size.Height - 52 - 24);
+        _saveBar.IsOpen = true;
+
+        // 从下方上浮动画
+        var translate = new TranslateTransform { Y = 60 };
+        if (_saveBarBorder != null)
+            _saveBarBorder.RenderTransform = translate;
+        var sb = new Storyboard();
+        var anim = new DoubleAnimation
         {
-            _data.Current = profile.Settings.Clone();
-            LoadSettingsIntoUi(_data.Current);
-            ApplyCurrent();
-            SaveState();
+            From = 60,
+            To = 0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(200)),
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(anim, translate);
+        Storyboard.SetTargetProperty(anim, "Y");
+        sb.Children.Add(anim);
+        sb.Begin();
+    }
+
+    private void HideSaveBar()
+    {
+        if (_saveBar != null)
+            _saveBar.IsOpen = false;
+    }
+
+    private void EnsureSaveBar()
+    {
+        if (_saveBar != null) return;
+
+        var saveButton = new Button
+        {
+            Content = "保存",
+            Padding = new Thickness(16, 6, 16, 6),
+            Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(255, 0, 120, 212)),
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+        saveButton.Click += (_, _) => SaveBarSave_Click();
+
+        var cancelButton = new Button
+        {
+            Content = "取消",
+            Padding = new Thickness(16, 6, 16, 6),
+            Background = new SolidColorBrush(Microsoft.UI.Colors.White),
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black),
+        };
+        cancelButton.Click += (_, _) => SaveBarCancel_Click();
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 14,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "配置发生改变，是否保存？",
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
         });
+        panel.Children.Add(saveButton);
+        panel.Children.Add(cancelButton);
+
+        var border = new Border
+        {
+            Width = 440,
+            Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(240, 40, 40, 40)),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(16, 10, 16, 10),
+        };
+        border.Child = panel;
+        _saveBarBorder = border;
+
+        _saveBar = new Popup
+        {
+            Child = border,
+            IsLightDismissEnabled = false,
+            XamlRoot = RootGrid.XamlRoot,
+        };
+    }
+
+    /// <summary>点击“保存”：把当前改动提交到激活配置（无激活则保留为当前配置），并持久化。</summary>
+    private void SaveBarSave_Click()
+    {
+        if (ActiveProfile is { } ap)
+            ap.Settings = _data.Current.Clone();
+        _savedSnapshot = _data.Current.Clone();
+        _pendingEdit = false;
+        HideSaveBar();
+        SaveState();
+    }
+
+    /// <summary>点击“取消”：回滚到最近一次已提交的配置，不保存。</summary>
+    private void SaveBarCancel_Click()
+    {
+        _data.Current = _savedSnapshot.Clone();
+        LoadSettingsIntoUi(_data.Current);
+        ApplyCurrent();
+        _pendingEdit = false;
+        HideSaveBar();
+        SaveState();
     }
 
     // ---------------- 快捷键 ----------------
@@ -988,12 +1361,12 @@ public sealed partial class MainWindow : Window
     {
         if (ProfileList.SelectedItem is not Profile p)
         {
-            CaptureHint.Text = "请先选择一个配置";
+            ShowCaptureHint("请先选择一个配置", "");
             return;
         }
         _capturingFor = p;
         _capturingGlobal = false;
-        CaptureHint.Text = "请按下要绑定的按键（可带也可不带 Ctrl/Alt/Shift/Win），Esc 取消…";
+        ShowCaptureHint("请按下要绑定的按键（可带也可不带 Ctrl/Alt/Shift/Win），Esc 取消…", "");
         RootGrid.Focus(FocusState.Programmatic);
     }
 
@@ -1001,8 +1374,17 @@ public sealed partial class MainWindow : Window
     {
         _capturingFor = null;
         _capturingGlobal = true;
-        CaptureHint.Text = "请按下全局开关按键（可带也可不带修饰键），Esc 取消…";
+        ShowCaptureHint("", "请按下全局开关按键（可带也可不带修饰键），Esc 取消…");
         RootGrid.Focus(FocusState.Programmatic);
+    }
+
+    /// <summary>显示快捷键设置提示，并安排在 10 秒后自动清空。</summary>
+    private void ShowCaptureHint(string profileText, string globalText)
+    {
+        CaptureHint.Text = profileText;
+        GlobalCaptureHint.Text = globalText;
+        _hintTimer.Stop();
+        _hintTimer.Start();
     }
 
     private void ClearHotkey_Click(object sender, RoutedEventArgs e)
@@ -1049,7 +1431,7 @@ public sealed partial class MainWindow : Window
         {
             _capturingFor = null;
             _capturingGlobal = false;
-            CaptureHint.Text = "已取消";
+            ShowCaptureHint("已取消", "已取消");
             return;
         }
 
@@ -1077,7 +1459,7 @@ public sealed partial class MainWindow : Window
             _data.GlobalDisplay = display;
             RegisterGlobalToggle();
             _capturingGlobal = false;
-            CaptureHint.Text = $"全局开关快捷键已设置为 {display}";
+            ShowCaptureHint("", $"全局开关快捷键已设置为 {display}");
             UpdateGlobalHotkeyBadge();
         }
         else if (_capturingFor is { } profile)
@@ -1087,7 +1469,7 @@ public sealed partial class MainWindow : Window
             profile.HotkeyDisplay = display;
             RegisterProfileHotkey(profile);
             _capturingFor = null;
-            CaptureHint.Text = $"已为「{profile.Name}」设置快捷键 {display}";
+            ShowCaptureHint($"已为「{profile.Name}」设置快捷键 {display}", "");
         }
 
         e.Handled = true;

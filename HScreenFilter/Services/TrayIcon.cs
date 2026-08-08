@@ -26,6 +26,7 @@ public sealed class TrayIcon : IDisposable
 
     private const uint MF_STRING = 0x00000000;
     private const uint MF_SEPARATOR = 0x00000800;
+    private const uint MF_CHECKED = 0x00000008;
     private const uint TPM_RIGHTBUTTON = 0x0002;
     private const uint TPM_RETURNCMD = 0x0100;
 
@@ -90,6 +91,12 @@ public sealed class TrayIcon : IDisposable
     private IntPtr _hIcon;
     private readonly Action _onShow;
     private readonly Action _onExit;
+
+    /// <summary>提供当前配置列表（名称 + 是否激活），用于右键菜单显示并在激活项前打勾。返回 null/空则不显示配置菜单。</summary>
+    public Func<(string Name, bool IsActive)[]>? ProfilesProvider { get; set; }
+
+    /// <summary>用户在右键菜单点击某个配置时回调（参数为配置索引）。</summary>
+    public Action<int>? ProfileSelected { get; set; }
 
     public TrayIcon(MessageWindow window, Action onShow, Action onExit)
     {
@@ -192,6 +199,19 @@ public sealed class TrayIcon : IDisposable
 
         IntPtr menu = CreatePopupMenu();
         AppendMenu(menu, MF_STRING, (IntPtr)1, "显示主窗口");
+
+        // 配置文件菜单：显示所有配置，当前生效（激活）的配置前打勾
+        var profiles = ProfilesProvider?.Invoke();
+        if (profiles != null && profiles.Length > 0)
+        {
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+            for (int i = 0; i < profiles.Length; i++)
+            {
+                uint flags = MF_STRING | (profiles[i].IsActive ? MF_CHECKED : 0);
+                AppendMenu(menu, flags, (IntPtr)(100 + i), profiles[i].Name);
+            }
+        }
+
         AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
         AppendMenu(menu, MF_STRING, (IntPtr)2, "退出");
 
@@ -201,6 +221,8 @@ public sealed class TrayIcon : IDisposable
             int cmd = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.X, pt.Y, _window.Handle, IntPtr.Zero);
             if (cmd == 1) _onShow();
             else if (cmd == 2) _onExit();
+            else if (cmd >= 100 && cmd < 100 + (profiles?.Length ?? 0))
+                ProfileSelected?.Invoke(cmd - 100);
         }
 
         DestroyMenu(menu);

@@ -21,6 +21,7 @@ public static class ShaderFilterEngine
     private static string _lastError = "";
     private static VorticeHslEngine? _engine;
     private static bool _running;
+    private static bool _capturable; // 覆盖层是否可被 OBS 等捕获（WDA_MONITOR）；重建引擎后要重新应用
 
     public static bool IsAvailable
     {
@@ -89,6 +90,9 @@ public static class ShaderFilterEngine
                         _engine = null;
                         return false;
                     }
+                    // 重建后重新应用“可被捕获”状态：否则新引擎默认为 WDA_EXCLUDEFROMCAPTURE，
+                    // 会导致 OBS（WGC/DXGI）都抓不到滤镜效果（UI 是 WDA_NONE 仍可见 → “只抓到 UI 抓不到滤镜”）。
+                    try { engine.Capturable = _capturable; } catch { }
                     _engine = engine;
                     _running = true;
                 }
@@ -111,11 +115,13 @@ public static class ShaderFilterEngine
         lock (_lock) StopInternal();
     }
 
-    /// <summary>设置覆盖层是否可被屏幕捕获（OBS 等）；转发给 VorticeHslEngine（若已启动，切换 WDA_MONITOR/EXCLUDEFROMCAPTURE）。</summary>
+    /// <summary>设置覆盖层是否可被屏幕捕获（OBS 等）；转发给 VorticeHslEngine（若已启动，切换 WDA_MONITOR/EXCLUDEFROMCAPTURE）。
+    /// 记录该状态，引擎重建后会自动重新应用，避免覆盖层意外退回 WDA_EXCLUDEFROMCAPTURE。</summary>
     public static void SetOverlayCapturable(bool capturable)
     {
         lock (_lock)
         {
+            _capturable = capturable;
             try { if (_engine != null) _engine.Capturable = capturable; } catch { }
         }
     }

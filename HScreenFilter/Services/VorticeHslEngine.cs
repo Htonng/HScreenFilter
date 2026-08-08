@@ -218,6 +218,7 @@ internal sealed class VorticeHslEngine : IDisposable
         {
             OverlayNative.SetWindowDisplayAffinity(_hwnd,
                 _capturable ? OverlayNative.WDA_MONITOR : OverlayNative.WDA_EXCLUDEFROMCAPTURE);
+            AppLog.Write("Engine", $"覆盖层 WDA={( _capturable ? "MONITOR(可捕获/WGC可见)" : "EXCLUDEFROMCAPTURE(全部排除)")}");
         }
         catch
         {
@@ -254,6 +255,8 @@ internal sealed class VorticeHslEngine : IDisposable
             BufferCount = 2,
             Scaling = Scaling.Stretch,
             SwapEffect = SwapEffect.FlipSequential,
+            // 不透明（忽略 alpha）：保证 HSL 逐像素调色正确显示。
+            // 注：不要改 Premultiplied 做逐像素透明——会破坏 HSL 分色系调色的显示。
             AlphaMode = AlphaMode.Ignore,
             Flags = 0,
         };

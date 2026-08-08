@@ -1,6 +1,6 @@
-; HScreenFilter v1.2.4 安装程序脚本 (Inno Setup 6)
+; HScreenFilter v1.2.5 安装程序脚本 (Inno Setup 6)
 #define MyAppName "HScreenFilter"
-#define MyAppVersion "1.2.4"
+#define MyAppVersion "1.2.5"
 #define MyAppPublisher "HScreenFilter"
 #define MyAppExeName "HScreenFilter.exe"
 

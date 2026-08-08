@@ -59,6 +59,14 @@
                            </StackPanel>
                         </Border>
                     </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="全局开关快捷键" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                        <Button Content="设置快捷键…" FontSize="11" Click="CaptureGlobalHotkey_Click"/>
+                        <Button Content="清除" FontSize="11" Click="ClearGlobalHotkey_Click"/>
+                    </StackPanel>
+                    <TextBlock x:Name="GlobalCaptureHint" FontSize="11" TextWrapping="Wrap"
+                               Foreground="{ThemeResource SystemFillColorCautionBrush}" Text=""/>
                 </StackPanel>
             </Border>
 
@@ -111,7 +119,7 @@
                                 Margin="0,0,0,12">
                            <StackPanel Spacing="12">
                                <StackPanel Spacing="4">
-                                   <TextBlock Text="🎨 HSL 调色盘" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                   <TextBlock Text="🎨 HSL 调色盘（Beta）" Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                    <TextBlock Text="像 Photoshop 一样，按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。"
                                               FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
                                </StackPanel>
@@ -280,7 +288,12 @@
                         </StackPanel>
                     </StackPanel>
 
-                    <ListView x:Name="ProfileList" Height="104" SelectionMode="Single"
+                    <ListView x:Name="ProfileList" Height="168" SelectionMode="Single"
+                             HorizontalContentAlignment="Stretch"
+                             CanDragItems="True" AllowDrop="True"
+                             DragItemsStarting="ProfileList_DragItemsStarting"
+                             DragOver="ProfileList_DragOver"
+                             Drop="ProfileList_Drop"
                              SelectionChanged="ProfileList_SelectionChanged">
                         <ListView.ItemTemplate>
                            <DataTemplate>
@@ -288,23 +301,36 @@
                                    <Grid.ColumnDefinitions>
                                        <ColumnDefinition Width="*"/>
                                        <ColumnDefinition Width="Auto"/>
+                                       <ColumnDefinition Width="Auto"/>
                                    </Grid.ColumnDefinitions>
                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                   <!-- 快捷键：绑定后显示在开关左边，未绑定则隐藏 -->
                                    <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                           CornerRadius="8" Padding="8,3" VerticalAlignment="Center">
+                                           CornerRadius="8" Padding="8,3" VerticalAlignment="Center"
+                                           Visibility="{Binding HotkeyVisibility}">
                                        <TextBlock Text="{Binding HotkeyDisplay}" FontSize="11"
                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                    </Border>
+                                   <!-- 应用开关：打开即应用该配置并自动保存改动（置于板块最右侧，左侧挨着快捷键） -->
+                                   <ToggleSwitch Grid.Column="2" IsOn="{Binding IsActive, Mode=TwoWay}"
+                                                 OffContent="" OnContent=""
+                                                 Toggled="ProfileActiveToggle_Toggled" VerticalAlignment="Center"
+                                                 HorizontalAlignment="Right" MinWidth="0"/>
                                </Grid>
                            </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
 
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="新建配置" Click="NewProfile_Click"/>
-                        <Button Content="更新所选" Click="UpdateProfile_Click"/>
-                        <Button Content="应用所选" Click="ApplyProfile_Click"/>
-                        <Button Content="删除配置" Click="DeleteProfile_Click"/>
+                    <StackPanel Spacing="8">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="新建配置" Click="NewProfile_Click"/>
+                            <Button Content="重命名" Click="RenameProfile_Click"/>
+                            <Button Content="删除配置" Click="DeleteProfile_Click"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="导入配置" Click="ImportProfile_Click"/>
+                            <Button Content="导出所选配置" Click="ExportProfile_Click"/>
+                        </StackPanel>
                     </StackPanel>
 
                     <Grid ColumnSpacing="12" RowSpacing="8">
@@ -314,19 +340,12 @@
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
                            <RowDefinition Height="Auto"/>
-                           <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="所选配置快捷键" VerticalAlignment="Center"/>
                         <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="8">
                            <Button Content="设置快捷键…" Click="CaptureHotkey_Click"/>
                            <Button Content="清除" Click="ClearHotkey_Click"/>
-                        </StackPanel>
-
-                        <TextBlock Grid.Row="1" Grid.Column="0" Text="全局开关快捷键" VerticalAlignment="Center"/>
-                        <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                           <Button Content="设置快捷键…" Click="CaptureGlobalHotkey_Click"/>
-                           <Button Content="清除" Click="ClearGlobalHotkey_Click"/>
                         </StackPanel>
                     </Grid>
 
@@ -335,18 +354,18 @@
 
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBlock Text="界面主题" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="ThemeComboBox" MinWidth="150" SelectionChanged="ThemeComboBox_SelectionChanged">
+                        <ComboBox x:Name="ThemeComboBox" MinWidth="150" SelectionChanged="ThemeComboBox_SelectionChanged"
+                                  PointerWheelChanged="ThemeComboBox_PointerWheelChanged">
                             <ComboBoxItem Content="默认主题" Tag="default"/>
                             <ComboBoxItem Content="Mica 主题" Tag="mica"/>
                         </ComboBox>
                     </StackPanel>
 
-                    <ToggleSwitch x:Name="CaptureSwitch" Header="UI 与滤镜层可被 OBS 捕获"
+                    <ToggleSwitch x:Name="CaptureSwitch" Header="UI 可被 OBS 捕获"
                                   OnContent="可捕获" OffContent="排除捕获" Toggled="CaptureSwitch_Toggled"/>
                     <TextBlock FontSize="11" TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               Text="开启后可被 OBS 等屏幕捕获：OBS 请用「显示器捕获（WGC 模式）」即可同时录到滤镜效果与 UI；不要用「窗口捕获」（WinUI 窗口 / 覆盖层用窗口捕获会黑屏或选不到）。"/>
-
+                               Text="开启后可被 OBS 等屏幕捕获（滤镜效果由于底层限制，目前没有被OBS捕获的解决方法）"/>
                     <ToggleSwitch x:Name="AutoStartSwitch" Header="开机自动启动" Toggled="AutoStartSwitch_Toggled"/>
                 </StackPanel>
             </Border>
