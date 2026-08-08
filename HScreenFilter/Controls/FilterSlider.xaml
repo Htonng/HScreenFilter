@@ -15,20 +15,37 @@
 
         <TextBlock Text="{x:Bind Header}" VerticalAlignment="Center" TextWrapping="Wrap"/>
 
-        <Slider x:Name="Slider"
-                Grid.Column="1"
-                VerticalAlignment="Center"
-                Minimum="{x:Bind Minimum}"
-                Maximum="{x:Bind Maximum}"
-                StepFrequency="1"
-                SnapsTo="StepValues"
-                ValueChanged="Slider_ValueChanged"/>
+        <Grid Grid.Column="1">
+            <!-- 彩色渐变轨道：Photoshop 式颜色滑块（无 Spectrum 时隐藏）
+                 仅在有 Spectrum 时由代码把默认轨道设为透明，露出渐变；否则保持默认轨道。 -->
+            <Border x:Name="SpectrumBar"
+                    Height="8" CornerRadius="4"
+                    VerticalAlignment="Center"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed"/>
+            <Slider x:Name="Slider"
+                    VerticalAlignment="Center"
+                    Minimum="{x:Bind Minimum}"
+                    Maximum="{x:Bind Maximum}"
+                    StepFrequency="1"
+                    SnapsTo="StepValues"
+                    ValueChanged="Slider_ValueChanged"/>
+        </Grid>
 
-        <TextBlock x:Name="ValueText"
-                   Grid.Column="2"
-                   Text="0"
-                   TextAlignment="Right"
-                   VerticalAlignment="Center"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        <TextBox x:Name="ValueText"
+                 Grid.Column="2"
+                 Text="0"
+                 TextAlignment="Right"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Center"
+                 Width="40"
+                 Margin="0,0,4,0"
+                 Padding="2,2"
+                 FontSize="12"
+                 BorderThickness="0"
+                 Background="Transparent"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                 KeyDown="ValueText_KeyDown"
+                 LostFocus="ValueText_LostFocus"/>
     </Grid>
 </UserControl>

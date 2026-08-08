@@ -1,25 +1,26 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using HScreenFilter.Models;
 
 namespace HScreenFilter.Services;
 
 /// <summary>
-/// 前台应用监听器：轮询当前前台窗口，判断是否命中目标应用。
-/// 目标可通过进程名（不含 .exe）或窗口标题（子串匹配）指定。
+/// 前台应用监听器：轮询当前前台窗口，判断命中哪个已绑定进程。
+/// 命中 = 进程名相等（忽略大小写，不含 .exe）且窗口标题包含绑定文字（绑定标题留空则任意标题）。
 /// 命中状态变化时触发事件（在调用线程上）。
 /// </summary>
 public sealed class ForegroundAppWatcher
 {
     private readonly System.Threading.Timer _timer;
-    private string _targetProcess = "";
-    private string _targetTitle = "";
-    private bool _currentMatch;
+    private List<AppBinding> _targets = new();
+    private AppBinding? _currentHit;
 
-    /// <summary>命中状态变化：(isMatch, processName, windowTitle)</summary>
-    public event Action<bool, string, string>? MatchChanged;
+    /// <summary>命中状态变化：(命中绑定, processName, windowTitle)。未命中任何绑定 → 第一个参数为 null。</summary>
+    public event Action<AppBinding?, string, string>? MatchChanged;
 
     public ForegroundAppWatcher()
     {
@@ -37,16 +38,15 @@ public sealed class ForegroundAppWatcher
         _timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
     }
 
-    /// <summary>设置监听目标。processName 可为空表示不按进程匹配；title 可为空表示不按标题匹配。</summary>
-    public void SetTarget(string processName, string title)
+    /// <summary>设置监听目标列表（进程名 + 可选标题 + 绑定配置）。空/空白进程名的条目会被忽略。</summary>
+    public void SetTargets(IEnumerable<AppBinding> targets)
     {
-        _targetProcess = string.IsNullOrWhiteSpace(processName) ? "" : processName.Trim().ToLowerInvariant();
-        _targetTitle = string.IsNullOrWhiteSpace(title) ? "" : title.Trim();
+        _targets = targets?.Where(t => !string.IsNullOrWhiteSpace(t.ProcessName)).ToList() ?? new();
         // 立即重算一次，避免状态滞后
         CheckNow();
     }
 
-    public bool CurrentMatch => _currentMatch;
+    public AppBinding? CurrentHit => _currentHit;
 
     private void OnTick(object? state)
     {
@@ -71,25 +71,31 @@ public sealed class ForegroundAppWatcher
             // 忽略查询异常
         }
 
-        bool match = false;
-        if (!string.IsNullOrEmpty(_targetProcess) && !string.IsNullOrEmpty(proc))
+        AppBinding? hit = null;
+        if (!string.IsNullOrEmpty(proc))
         {
-            match = proc.Equals(_targetProcess, StringComparison.OrdinalIgnoreCase);
-        }
-        else if (!string.IsNullOrEmpty(_targetTitle) && !string.IsNullOrEmpty(title))
-        {
-            match = title.IndexOf(_targetTitle, StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-        else if (string.IsNullOrEmpty(_targetProcess) && string.IsNullOrEmpty(_targetTitle))
-        {
-            match = false;
+            foreach (var t in _targets)
+            {
+                if (!proc.Equals(t.ProcessName.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.IsNullOrWhiteSpace(t.WindowTitle) &&
+                    title.IndexOf(t.WindowTitle.Trim(), StringComparison.OrdinalIgnoreCase) < 0) continue;
+                hit = t;
+                break;
+            }
         }
 
-        if (match != _currentMatch)
+        if (!IsSame(hit, _currentHit))
         {
-            _currentMatch = match;
-            MatchChanged?.Invoke(match, proc, title);
+            _currentHit = hit;
+            MatchChanged?.Invoke(hit, proc, title);
         }
+    }
+
+    private static bool IsSame(AppBinding? a, AppBinding? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a == null || b == null) return false;
+        return a.ProcessName == b.ProcessName && a.WindowTitle == b.WindowTitle && a.ProfileIndex == b.ProfileIndex;
     }
 
     private static string GetProcessName(IntPtr hwnd)

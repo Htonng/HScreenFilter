@@ -113,7 +113,7 @@ public sealed class TrayIcon : IDisposable
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _hIcon,
-            szTip = "屏幕滤镜",
+            szTip = "HScreenFilter",
         };
         _added = Shell_NotifyIcon(NIM_ADD, ref _nid);
     }

@@ -7,6 +7,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.System;
 using HScreenFilter.Controls;
 using HScreenFilter.Models;
@@ -25,6 +26,7 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<Profile, int> _profileHotkeyIds = new();
     private readonly DispatcherQueueTimer _applyTimer;
     private readonly DispatcherQueueTimer _saveTimer;
+    private bool _uiInit;   // 避免恢复置顶/可捕获开关状态时触发 UI 事件
     private TrayIcon? _tray;
     private Profile? _capturingFor;
     private bool _capturingGlobal;
@@ -35,7 +37,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        Title = "屏幕滤镜";
+        Title = "HScreenFilter";
 
         // 设置窗口与任务栏图标
         try
@@ -66,19 +68,28 @@ public sealed partial class MainWindow : Window
         foreach (var p in _data.Profiles)
             _profiles.Add(p);
 
-        // 初始化滤镜引擎
+        // 窗口装饰：按主题设置背景（默认无毛玻璃兼容老设备；Mica 为毛玻璃）
+        ApplyWindowTheme(_data.Theme);
+        _themeInit = true;
+        ThemeComboBox.SelectedIndex = _data.Theme == "mica" ? 1 : 0;
+        _themeInit = false;
+
+        // 可被 OBS 捕获开关（UI 恒置顶，避免关闭置顶后 UI 被滤镜覆盖层盖住看不见）
+        _uiInit = true;
+        CaptureSwitch.IsOn = _data.Captureable;
+        _uiInit = false;
+
+        // 需求 2：UI 置顶且不被 DXGI 滤镜捕获（UI 颜色不受滤镜影响）
+        TryEnsureUiTopmost();
+
+        // 恢复 DXGI 开关状态，再初始化滤镜引擎
+        _dxgiInit = true;
+        DxgiSwitch.IsOn = _data.UseDxgi; // 触发 Toggled → 设置引擎模式
+        FilterEngine.UseDxgi = _data.UseDxgi;
+        _dxgiInit = false;
         FilterEngine.Initialize();
-        StatusText.Text = FilterEngine.Kind switch
-        {
-            FilterEngineKind.FullScreenColorEffect => "滤镜引擎：全屏颜色效果（支持全部调节项）",
-            FilterEngineKind.GammaRamp => "滤镜引擎：显卡伽马曲线（鲜艳度不可用）",
-            _ => "滤镜引擎不可用：" + FilterEngine.LastError,
-        };
-        if (FilterEngine.Kind == FilterEngineKind.GammaRamp)
-        {
-            SaturationSlider.IsEnabled = false;
-            SaturationSlider.Header = "鲜艳度 Saturation（当前引擎不支持）";
-        }
+        UpdateEngineStatus();
+        RefreshHslEnabled();
 
         // 滑块事件
         BrightnessSlider.ValueChangedExternal += (_, v) => { _data.Current.Brightness = v; ScheduleApply(); };
@@ -87,6 +98,9 @@ public sealed partial class MainWindow : Window
         HighlightSlider.ValueChangedExternal += (_, v) => { _data.Current.Highlights = v; ScheduleApply(); };
         ShadowSlider.ValueChangedExternal += (_, v) => { _data.Current.Shadows = v; ScheduleApply(); };
         TemperatureSlider.ValueChangedExternal += (_, v) => { _data.Current.Temperature = v; ScheduleApply(); };
+        // HSL 面板：色相 / 饱和度 / 明亮度 三个子区域的全部滑块
+        foreach (var (slider, channel, field) in AllHslSliders())
+            WireHslSlider(slider, channel, field);
 
         LoadSettingsIntoUi(_data.Current);
 
@@ -98,14 +112,13 @@ public sealed partial class MainWindow : Window
         EnableSwitch.IsOn = _data.IsEnabled; // 触发 Toggled → 应用滤镜
         UpdateGlobalHotkeyBadge();
 
-        // 按应用切换滤镜
+        // 按应用切换滤镜（进程列表 + 配置绑定）
         _foregroundWatcher = new ForegroundAppWatcher();
         _foregroundWatcher.MatchChanged += ForegroundWatcher_MatchChanged;
         _perAppInit = true;
         PerAppSwitch.IsOn = _data.PerAppEnabled;
-        PerAppProcessBox.Text = _data.PerAppProcess;
-        PerAppTitleBox.Text = _data.PerAppTitle;
         _perAppInit = false;
+        RefreshBindingList();
         UpdatePerAppStatus();
         if (_data.PerAppEnabled)
             StartPerAppWatching();
@@ -126,8 +139,8 @@ public sealed partial class MainWindow : Window
 
     private bool _sizeApplied;
     private ForegroundAppWatcher _foregroundWatcher = null!;
-    private bool _perAppActive;   // 按应用模式下，当前是否命中目标应用（前台）
-    private bool _perAppInit;     // 避免恢复状态时触发 UI 事件
+    private AppBinding? _activeBinding;   // 按应用模式下，当前命中的绑定（null=未命中）
+    private bool _perAppInit;             // 避免恢复状态时触发 UI 事件
 
     // 窗口激活后设置一次固定尺寸。参数顺序：(宽, 高)。
     // 仅在首次激活时设置一次，避免与 Windows 记录的窗口状态反复竞争。
@@ -140,17 +153,160 @@ public sealed partial class MainWindow : Window
         try
         {
             var appWindow = this.AppWindow;
-            appWindow.Resize(new Windows.Graphics.SizeInt32(580, 860));
+            appWindow.Resize(new Windows.Graphics.SizeInt32(680, 860));
 
             if (appWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p)
             {
-                p.PreferredMinimumWidth = 580;
+                p.PreferredMinimumWidth = 540;
                 p.PreferredMinimumHeight = 860;
             }
+
+            // 内容延伸到标题栏后需指定可拖动区域（标题栏行）
+            SetupTitleBarDragArea();
+            TryEnsureUiTopmost();
         }
         catch
         {
             // 忽略尺寸设置失败
+        }
+    }
+
+    /// <summary>设置标题栏拖动区域（ExtendsContentIntoTitleBar 后必须指定，否则窗口无法拖动）。</summary>
+    private void SetupTitleBarDragArea()
+    {
+        try
+        {
+            var tb = this.AppWindow.TitleBar;
+            if (!tb.ExtendsContentIntoTitleBar) return;
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            uint dpi = OverlayNative.GetDpiForWindow(hwnd);
+            float scale = dpi / 96f;
+            int titleH = (int)(32 * scale);        // 标题栏高（物理像素）
+            int rightReserve = (int)(150 * scale); // 右侧留给系统按钮
+            int w = (int)(680 * scale);
+            tb.SetDragRectangles(new[]
+            {
+                new Windows.Graphics.RectInt32(0, 0, Math.Max(1, w - rightReserve), titleH),
+            });
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>对本进程所有可见 UI 顶层窗口执行操作（WinUI 3 有内外两层窗口，需都设置；
+    /// 跳过滤镜覆盖层，保持其 WDA 排除防自反馈 + 置顶）。</summary>
+    private static void ForEachOwnWindow(Action<IntPtr> action)
+    {
+        uint currentPid = (uint)Environment.ProcessId;
+        OverlayNative.EnumWindows((h, l) =>
+        {
+            OverlayNative.GetWindowThreadProcessId(h, out uint pid);
+            if (pid == currentPid && OverlayNative.IsWindowVisible(h) && !IsOverlayWindow(h))
+            {
+                try { action(h); } catch { }
+            }
+            return true;
+        }, IntPtr.Zero);
+    }
+
+    /// <summary>是否为滤镜覆盖层窗口（不能被取消 WDA/去置顶，否则自反馈、滤镜层被盖住）。</summary>
+    private static bool IsOverlayWindow(IntPtr h)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder(128);
+            OverlayNative.GetClassName(h, sb, sb.Capacity);
+            return sb.ToString() == "HScreenFilterVorticeOverlay";
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>应用 UI 置顶 + 可捕获两个开关：
+    ///   置顶开关（UiTopmostSwitch）：UI 是否置顶（盖在滤镜覆盖层之上，否则被覆盖层挡住看不见）；
+    ///   可捕获开关（CaptureSwitch）：UI 与滤镜层是否可被 OBS 等屏幕捕获。
+    ///     可捕获开 → UI 与覆盖层设 WDA_MONITOR：仅从 DXGI Desktop Duplication 排除
+    ///                 （覆盖层自捕获看不到自己/UI = 防自反馈 + 防 UI 重影），
+    ///                 但 OBS（WGC 显示器捕获 / 窗口捕获 BitBlt）仍可见，滤镜效果可被录制。
+    ///     可捕获关 → WDA_EXCLUDEFROMCAPTURE（从一切捕获排除，颜色不受滤镜影响）。</summary>
+    private void TryEnsureUiTopmost()
+    {
+        try
+        {
+            // UI 恒置顶（强制）：覆盖层恒置顶，若 UI 不置顶会被滤镜层盖住看不见
+            bool top = true;
+            bool cap = _data.Captureable;
+
+            // WinUI 原生置顶（比 Win32 样式可靠，不会被 WinUI 重置）
+            try
+            {
+                if (this.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p)
+                    p.IsAlwaysOnTop = top;
+            }
+            catch { }
+
+            // UI 窗口（WinUI 3 有内外两层，需都设置；跳过滤镜覆盖层）
+            ForEachOwnWindow(h =>
+            {
+                OverlayNative.SetWindowDisplayAffinity(h,
+                    cap ? OverlayNative.WDA_MONITOR : OverlayNative.WDA_EXCLUDEFROMCAPTURE);
+                // 分层/WinUI 窗口仅 SetWindowPos 置顶无效，需改 WS_EX_TOPMOST 样式位
+                OverlayNative.SetTopmost(h, top);
+            });
+
+            // 滤镜覆盖层：可捕获→WDA_MONITOR（防自反馈）；否则→WDA_EXCLUDEFROMCAPTURE。恒置顶（覆盖层内部）。
+            FilterEngine.SetOverlayCapturable(cap);
+
+            AppLog.Write("UI", $"UI置顶={top} 可捕获={cap} → 覆盖层WDA={(cap ? "MONITOR(防自反馈+OBS可见)" : "EXCLUDEFROMCAPTURE")}");
+        }
+        catch
+        {
+        }
+    }
+
+    private void CaptureSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_uiInit) return;
+        _data.Captureable = CaptureSwitch.IsOn;
+        TryEnsureUiTopmost();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>按主题设置窗口背景与标题栏装饰：default=无毛玻璃（兼容老设备）；mica=毛玻璃。</summary>
+    private void ApplyWindowTheme(string theme)
+    {
+        try
+        {
+            var tb = this.AppWindow.TitleBar;
+            tb.ExtendsContentIntoTitleBar = true;
+            tb.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+            tb.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+            tb.ButtonHoverBackgroundColor = Microsoft.UI.ColorHelper.FromArgb(40, 255, 255, 255);
+            tb.ButtonPressedBackgroundColor = Microsoft.UI.ColorHelper.FromArgb(60, 255, 255, 255);
+            SystemBackdrop = theme == "mica" ? new MicaBackdrop() : null;
+        }
+        catch
+        {
+            // 主题切换失败不影响主流程
+        }
+    }
+
+    private bool _themeInit;
+
+    private void ThemeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_themeInit) return;
+        if (ThemeComboBox.SelectedItem is ComboBoxItem item)
+        {
+            var theme = (item.Tag as string) == "mica" ? "mica" : "default";
+            _data.Theme = theme;
+            ApplyWindowTheme(theme);
+            _saveTimer.Stop();
+            _saveTimer.Start();
         }
     }
 
@@ -164,18 +320,57 @@ public sealed partial class MainWindow : Window
         _saveTimer.Start();
     }
 
+    /// <summary>返回 HSL 全部中性的滤镜设置副本（保留基础调节项），用于放大镜引擎（HSL 不可用）。</summary>
+    private static FilterSettings NeutralizeHsl(FilterSettings s)
+    {
+        var clone = s.Clone();
+        clone.Hue = 0;
+        clone.HslSaturation = 100;
+        clone.Lightness = 0;
+        foreach (var ch in clone.HslChannels)
+        {
+            ch.Hue = 0;
+            ch.Saturation = 100;
+            ch.Lightness = 0;
+        }
+        return clone;
+    }
+
     private void ApplyCurrent()
     {
         // 实际是否应用滤镜：
         //  - 总开关（EnableSwitch）关闭 → 必关
-        //  - 按应用模式开启 → 还需前台命中目标应用（_perAppActive）
-        bool shouldApply = EnableSwitch.IsOn &&
-                           (!_data.PerAppEnabled || _perAppActive);
+        //  - 按应用模式开启且列表非空 → 需前台命中某绑定（_activeBinding != null），否则自动关闭
+        bool perAppRequiresHit = _data.PerAppEnabled && _data.AppBindings.Count > 0;
+        bool shouldApply = EnableSwitch.IsOn && (!perAppRequiresHit || _activeBinding != null);
+        AppLog.Write("Apply",
+            $"shouldApply={shouldApply} IsEnabled={EnableSwitch.IsOn} PerAppEnabled={_data.PerAppEnabled} Bindings={_data.AppBindings.Count} active={( _activeBinding != null)}");
 
         if (shouldApply)
         {
-            if (!FilterEngine.Apply(_data.Current))
+            FilterSettings settings;
+            // 命中绑定且绑定了配置 → 自动应用该配置的滤镜设置
+            if (perAppRequiresHit && _activeBinding != null && _activeBinding.ProfileIndex >= 0 &&
+                _activeBinding.ProfileIndex < _profiles.Count)
+            {
+                settings = _profiles[_activeBinding.ProfileIndex].Settings;
+            }
+            // 关闭 DXGI（放大镜引擎）时 HSL 不可用 → 应用时忽略 HSL，避免近似模拟出分色效果
+            else
+            {
+                settings = _data.UseDxgi ? _data.Current : NeutralizeHsl(_data.Current);
+            }
+
+            if (!FilterEngine.Apply(settings))
+            {
                 StatusText.Text = "应用滤镜失败：" + FilterEngine.LastError;
+                UpdateEngineStatus(); // 可能已回退到其它引擎
+            }
+            else
+            {
+                // 滤镜覆盖层创建后，确保 UI 重新置顶在滤镜层之上
+                TryEnsureUiTopmost();
+            }
         }
         else
         {
@@ -183,11 +378,100 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // ---------------- 按应用切换滤镜 ----------------
+    /// <summary>刷新引擎状态与 HSL 提示文案。</summary>
+    private void UpdateEngineStatus()
+    {
+        StatusText.Text = FilterEngine.Kind switch
+        {
+            FilterEngineKind.PixelShader => "滤镜引擎：DXGI 逐像素着色器（支持 HSL 调色）",
+            FilterEngineKind.FullScreenColorEffect => "滤镜引擎：全屏颜色效果（放大镜 API，HSL 不可用）",
+            FilterEngineKind.GammaRamp => "滤镜引擎：显卡伽马曲线（鲜艳度不可用）",
+            _ => "滤镜引擎不可用：" + FilterEngine.LastError,
+        };
+        UpdateHslHint();
+    }
+
+    private void UpdateHslHint()
+    {
+        if (HslChannelHint == null) return;
+        HslChannelHint.Text = FilterEngine.Kind == FilterEngineKind.PixelShader
+            ? "已启用 DXGI 引擎：红/橙/黄/绿/青/蓝/紫/品红可分别精确调整、互不干扰（逐像素着色器）。"
+            : "提示：关闭 DXGI 后使用放大镜引擎，暂不支持分色系 HSL。";
+    }
+
+    /// <summary>根据当前引擎是否可用 HSL 启用/禁用 HSL 面板与滑块。</summary>
+    private void RefreshHslEnabled()
+    {
+        bool hslOk = FilterEngine.Kind == FilterEngineKind.PixelShader;
+        HslPivot.IsEnabled = hslOk;
+        foreach (var (slider, _, _) in AllHslSliders())
+            slider.IsEnabled = hslOk;
+    }
+
+    // ---------------- DXGI 引擎开关 ----------------
+
+    private bool _dxgiInit; // 避免恢复状态时触发 UI 事件
+
+    private void DxgiSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_dxgiInit) return;
+        bool useDxgi = DxgiSwitch.IsOn;
+
+        // 开启时提示性能代价
+        if (useDxgi)
+        {
+            DxgiSwitch.IsOn = false; // 先回弹，等用户确认
+            var dialog = new ContentDialog
+            {
+                Title = "启用 DXGI 引擎",
+                Content = new TextBlock
+                {
+                    Text = "启用 DXGI 时 HSL 功能可用，但会造成性能损失，是否启用？",
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 8, 0, 0),
+                },
+                PrimaryButtonText = "启用",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = RootGrid.XamlRoot,
+            };
+            _ = ConfirmDxgiEnableAsync(dialog);
+            return;
+        }
+
+        ApplyDxgiMode(false);
+    }
+
+    private async System.Threading.Tasks.Task ConfirmDxgiEnableAsync(ContentDialog dialog)
+    {
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary)
+        {
+            _dxgiInit = true;
+            DxgiSwitch.IsOn = true;
+            _dxgiInit = false;
+            ApplyDxgiMode(true);
+        }
+    }
+
+    /// <summary>应用 DXGI 模式：设置引擎、刷新引擎状态与 HSL 可用性、应用滤镜并保存。</summary>
+    private void ApplyDxgiMode(bool useDxgi)
+    {
+        _data.UseDxgi = useDxgi;
+        FilterEngine.UseDxgi = useDxgi;
+        FilterEngine.Initialize();
+        UpdateEngineStatus();
+        RefreshHslEnabled();
+        ApplyCurrent();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    // ---------------- 按应用切换滤镜（进程列表 + 配置绑定） ----------------
 
     private void StartPerAppWatching()
     {
-        _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
+        _foregroundWatcher.SetTargets(_data.AppBindings);
         _foregroundWatcher.Start(500);
     }
 
@@ -196,12 +480,15 @@ public sealed partial class MainWindow : Window
         _foregroundWatcher.Stop();
     }
 
-    private void ForegroundWatcher_MatchChanged(bool isMatch, string process, string title)
+    private void ForegroundWatcher_MatchChanged(AppBinding? hit, string process, string title)
     {
         // watcher 在后台线程回调，需切回 UI 线程
         DispatcherQueue.TryEnqueue(() =>
         {
-            _perAppActive = isMatch;
+            _activeBinding = hit;
+            AppLog.Write("PerApp", hit == null
+                ? $"未命中 (前台={process} 标题={title}) → 关闭滤镜"
+                : $"命中 {hit.ProcessName} → 应用绑定配置{(hit.ProfileIndex >= 0 ? $" #{hit.ProfileIndex}" : "")}");
             UpdatePerAppStatus();
             ApplyCurrent();
             _saveTimer.Stop();
@@ -217,12 +504,20 @@ public sealed partial class MainWindow : Window
             PerAppStatus.Text = "";
             return;
         }
-        string target = string.IsNullOrEmpty(_data.PerAppProcess)
-            ? (string.IsNullOrEmpty(_data.PerAppTitle) ? "(未设置)" : $"标题「{_data.PerAppTitle}」")
-            : $"进程 {_data.PerAppProcess}";
-        PerAppStatus.Text = _perAppActive
-            ? $"● 目标应用在前台，滤镜已启用（{target}）"
-            : $"○ 目标应用不在前台，滤镜已关闭（{target}）";
+        if (_data.AppBindings.Count == 0)
+        {
+            PerAppStatus.Text = "○ 尚未添加要检测的应用（请点击「添加应用…」）";
+            return;
+        }
+        if (_activeBinding == null)
+        {
+            PerAppStatus.Text = $"○ 列表内无进程在前台，滤镜已自动关闭（共 {_data.AppBindings.Count} 个检测目标）";
+            return;
+        }
+        string cfg = _activeBinding.ProfileIndex >= 0 && _activeBinding.ProfileIndex < _profiles.Count
+            ? $"已自动应用配置「{_profiles[_activeBinding.ProfileIndex].Name}」"
+            : "按当前设置应用";
+        PerAppStatus.Text = $"● {_activeBinding.ProcessName} 在前台，滤镜已启用（{cfg}）";
     }
 
     private void PerAppSwitch_Toggled(object sender, RoutedEventArgs e)
@@ -236,7 +531,7 @@ public sealed partial class MainWindow : Window
         else
         {
             StopPerAppWatching();
-            _perAppActive = false;
+            _activeBinding = null;
         }
         UpdatePerAppStatus();
         ApplyCurrent();
@@ -244,38 +539,165 @@ public sealed partial class MainWindow : Window
         _saveTimer.Start();
     }
 
-    private void PerAppProcessBox_TextChanged(object sender, TextChangedEventArgs e)
+    private void RefreshBindingList()
     {
-        if (_perAppInit) return;
-        _data.PerAppProcess = PerAppProcessBox.Text.Trim();
-        if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
-        SaveState();
+        foreach (var b in _data.AppBindings)
+            b.ProfileName = b.ProfileIndex >= 0 && b.ProfileIndex < _profiles.Count
+                ? _profiles[b.ProfileIndex].Name : "";
+        AppBindingList.ItemsSource = null;
+        AppBindingList.ItemsSource = _data.AppBindings;
     }
 
-    private void PerAppTitleBox_TextChanged(object sender, TextChangedEventArgs e)
+    private async void AddBinding_Click(object sender, RoutedEventArgs e)
     {
-        if (_perAppInit) return;
-        _data.PerAppTitle = PerAppTitleBox.Text.Trim();
-        if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
-        SaveState();
+        var binding = new AppBinding();
+        if (await EditBindingDialogAsync(binding))
+        {
+            _data.AppBindings.Add(binding);
+            RefreshBindingList();
+            if (_data.PerAppEnabled) StartPerAppWatching();
+            SaveState();
+            UpdatePerAppStatus();
+            ApplyCurrent();
+        }
     }
 
-    private void PickForegroundButton_Click(object sender, RoutedEventArgs e)
+    private async void EditBinding_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AppBinding b) return;
+        var copy = new AppBinding { ProcessName = b.ProcessName, WindowTitle = b.WindowTitle, ProfileIndex = b.ProfileIndex };
+        if (await EditBindingDialogAsync(copy))
+        {
+            b.ProcessName = copy.ProcessName;
+            b.WindowTitle = copy.WindowTitle;
+            b.ProfileIndex = copy.ProfileIndex;
+            RefreshBindingList();
+            if (_data.PerAppEnabled) StartPerAppWatching();
+            SaveState();
+            UpdatePerAppStatus();
+            ApplyCurrent();
+        }
+    }
+
+    private void DeleteBinding_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AppBinding b) return;
+        _data.AppBindings.Remove(b);
+        if (ReferenceEquals(_activeBinding, b)) _activeBinding = null;
+        RefreshBindingList();
+        if (_data.PerAppEnabled) StartPerAppWatching();
+        SaveState();
+        UpdatePerAppStatus();
+        ApplyCurrent();
+    }
+
+    /// <summary>弹出「添加/编辑检测应用」对话框：进程名（必填）+ 可选窗口标题 + 绑定配置。返回 true 表示确认并已写入 binding。</summary>
+    private async Task<bool> EditBindingDialogAsync(AppBinding binding)
+    {
+        var procBox = new TextBox { PlaceholderText = "例如 notepad 或 chrome", Text = binding.ProcessName, MinWidth = 240 };
+        var titleBox = new TextBox { PlaceholderText = "标题包含的文字（可选，留空匹配任意标题）", Text = binding.WindowTitle, MinWidth = 240 };
+        var cfgCombo = new ComboBox { MinWidth = 240 };
+        cfgCombo.Items.Add(new ComboBoxItem { Content = "（不切换配置，按当前设置）", Tag = -1 });
+        for (int i = 0; i < _profiles.Count; i++)
+            cfgCombo.Items.Add(new ComboBoxItem { Content = _profiles[i].Name, Tag = i });
+        int sel = binding.ProfileIndex + 1;
+        cfgCombo.SelectedIndex = sel >= 0 && sel < cfgCombo.Items.Count ? sel : 0;
+
+        var panel = new StackPanel { Spacing = 12, Margin = new Thickness(0, 8, 0, 0) };
+        panel.Children.Add(new TextBlock { Text = "进程名（不含 .exe）" });
+        panel.Children.Add(procBox);
+        panel.Children.Add(new TextBlock { Text = "窗口标题（可选）" });
+        panel.Children.Add(titleBox);
+        panel.Children.Add(new TextBlock { Text = "该进程在前台时自动应用的配置" });
+        panel.Children.Add(cfgCombo);
+
+        var dialog = new ContentDialog
+        {
+            Title = "添加检测应用",
+            Content = panel,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RootGrid.XamlRoot,
+        };
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary) return false;
+        if (string.IsNullOrWhiteSpace(procBox.Text)) return false; // 进程名必填
+        binding.ProcessName = procBox.Text.Trim();
+        binding.WindowTitle = titleBox.Text.Trim();
+        if (cfgCombo.SelectedItem is ComboBoxItem item && item.Tag is int idx)
+            binding.ProfileIndex = idx;
+        return true;
+    }
+
+    private async void PickForegroundButton_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            // 读取当前前台窗口的进程名与标题，填入输入框
+            // 倒计时：提示用户在 5 秒内切换到要添加的进程，随后捕获当时的前台窗口
+            const int countdownSeconds = 5;
+            var dq = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+            var timer = dq.CreateTimer();
+            timer.Interval = TimeSpan.FromSeconds(1);
+
+            var countdownText = new TextBlock { FontSize = 36, HorizontalAlignment = HorizontalAlignment.Center, Text = countdownSeconds.ToString() };
+            var hintText = new TextBlock
+            {
+                Text = "请在倒计时结束前切换到要添加的进程（当前窗口在前台即被捕获），倒计时结束后自动添加。",
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["TextFillColorSecondaryBrush"],
+            };
+            var panel = new StackPanel { Spacing = 12 };
+            panel.Children.Add(countdownText);
+            panel.Children.Add(hintText);
+
+            var dialog = new ContentDialog
+            {
+                Title = "从前台窗口添加",
+                Content = panel,
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = RootGrid.XamlRoot,
+            };
+
+            int remaining = countdownSeconds;
+            timer.Tick += (_, _) =>
+            {
+                remaining--;
+                countdownText.Text = remaining.ToString();
+                if (remaining <= 0)
+                {
+                    timer.Stop();
+                    dialog.Hide();
+                }
+            };
+            timer.Start();
+            dialog.Closed += (_, _) => timer.Stop();
+
+            var result = await dialog.ShowAsync();
+            // 用户点击“取消”（或未倒计时完就关闭）：当 result 为 None 且倒计时未结束 → 放弃添加
+            if (result == ContentDialogResult.None && remaining > 0) return;
+            // 倒计时结束（倒计时已归零）→ 继续添加
+            if (remaining > 0) return;
+
             IntPtr hwnd = ForegroundAppWatcher.GetForegroundWindowForPicker();
             var (proc, title) = ForegroundAppWatcher.GetForegroundInfo(hwnd);
-            _perAppInit = true;
-            if (!string.IsNullOrEmpty(proc)) PerAppProcessBox.Text = proc;
-            if (!string.IsNullOrEmpty(title)) PerAppTitleBox.Text = title;
-            _perAppInit = false;
-            _data.PerAppProcess = PerAppProcessBox.Text.Trim();
-            _data.PerAppTitle = PerAppTitleBox.Text.Trim();
-            if (_data.PerAppEnabled) _foregroundWatcher.SetTarget(_data.PerAppProcess, _data.PerAppTitle);
-            SaveState();
-            UpdatePerAppStatus();
+            if (string.IsNullOrEmpty(proc))
+            {
+                PerAppStatus.Text = "未能读取当前前台应用";
+                return;
+            }
+            var binding = new AppBinding { ProcessName = proc, WindowTitle = title };
+            if (await EditBindingDialogAsync(binding))
+            {
+                _data.AppBindings.Add(binding);
+                RefreshBindingList();
+                if (_data.PerAppEnabled) StartPerAppWatching();
+                SaveState();
+                UpdatePerAppStatus();
+                ApplyCurrent();
+            }
         }
         catch (Exception ex)
         {
@@ -290,8 +712,8 @@ public sealed partial class MainWindow : Window
         _data.Profiles = new List<Profile>(_profiles);
         _data.SelectedProfileIndex = ProfileList.SelectedIndex;
         _data.PerAppEnabled = PerAppSwitch?.IsOn ?? _data.PerAppEnabled;
-        _data.PerAppProcess = PerAppProcessBox?.Text.Trim() ?? _data.PerAppProcess;
-        _data.PerAppTitle = PerAppTitleBox?.Text.Trim() ?? _data.PerAppTitle;
+        _data.Captureable = CaptureSwitch?.IsOn ?? _data.Captureable;
+        _data.UseDxgi = DxgiSwitch?.IsOn ?? _data.UseDxgi;
         _store.Save(_data);
     }
 
@@ -303,6 +725,152 @@ public sealed partial class MainWindow : Window
         HighlightSlider.SetValueSilently(s.Highlights);
         ShadowSlider.SetValueSilently(s.Shadows);
         TemperatureSlider.SetValueSilently(s.Temperature);
+
+        // 加载全部 HSL 滑块（色相/饱和度/明亮度 三个子区域）
+        LoadHslSliders(s);
+    }
+
+    /// <summary>打开调试日志文件（用默认关联程序打开）。</summary>
+    private void DebugLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var logPath = AppLog.FilePath;
+            if (!File.Exists(logPath)) AppLog.Write("UI", "首次打开调试日志");
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(logPath)
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write("UI", "打开日志失败: " + ex.Message);
+            StatusText.Text = "打开日志失败：" + ex.Message;
+        }
+    }
+
+    // ---------------- HSL 面板（色相/饱和度/明度 三子区域） ----------------
+
+    private enum HslField { Hue, Saturation, Lightness }
+
+    /// <summary>把滑块事件绑定到对应色系/字段。</summary>
+    private void WireHslSlider(FilterSlider slider, string channelName, HslField field)
+    {
+        slider.ValueChangedExternal += (_, v) =>
+        {
+            SetHslValue(_data.Current, channelName, field, v);
+            ScheduleApply();
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        };
+    }
+
+    /// <summary>把数值写入对应色系/字段（全部=主标量，其余写进 HslChannels）。</summary>
+    private static void SetHslValue(FilterSettings s, string channelName, HslField field, double value)
+    {
+        if (channelName == HslChannelNames.Master)
+        {
+            if (field == HslField.Hue) s.Hue = value;
+            else if (field == HslField.Saturation) s.HslSaturation = value;
+            else s.Lightness = value;
+        }
+        else
+        {
+            var ch = s.HslChannels.FirstOrDefault(c => c.Name == channelName);
+            if (ch == null)
+            {
+                ch = new HslChannel { Name = channelName };
+                s.HslChannels.Add(ch);
+            }
+            if (field == HslField.Hue) ch.Hue = value;
+            else if (field == HslField.Saturation) ch.Saturation = value;
+            else ch.Lightness = value;
+        }
+    }
+
+    /// <summary>读取对应色系/字段的当前值。</summary>
+    private static double ChannelValue(FilterSettings s, string channelName, HslField field)
+    {
+        if (channelName == HslChannelNames.Master)
+            return field switch
+            {
+                HslField.Hue => s.Hue,
+                HslField.Saturation => s.HslSaturation,
+                _ => s.Lightness,
+            };
+        var ch = s.HslChannels.FirstOrDefault(c => c.Name == channelName);
+        if (ch == null) return field == HslField.Saturation ? 100.0 : 0.0;
+        return field switch
+        {
+            HslField.Hue => ch.Hue,
+            HslField.Saturation => ch.Saturation,
+            _ => ch.Lightness,
+        };
+    }
+
+    /// <summary>全部 27 个 HSL 滑块及其对应的色系/字段（8 色系 + 全部主）。</summary>
+    private IEnumerable<(FilterSlider Slider, string Channel, HslField Field)> AllHslSliders()
+    {
+        yield return (HueMasterSlider, HslChannelNames.Master, HslField.Hue);
+        yield return (HueRedSlider, HslChannelNames.Red, HslField.Hue);
+        yield return (HueOrangeSlider, HslChannelNames.Orange, HslField.Hue);
+        yield return (HueYellowSlider, HslChannelNames.Yellow, HslField.Hue);
+        yield return (HueGreenSlider, HslChannelNames.Green, HslField.Hue);
+        yield return (HueCyanSlider, HslChannelNames.Cyan, HslField.Hue);
+        yield return (HueBlueSlider, HslChannelNames.Blue, HslField.Hue);
+        yield return (HuePurpleSlider, HslChannelNames.Purple, HslField.Hue);
+        yield return (HueMagentaSlider, HslChannelNames.Magenta, HslField.Hue);
+
+        yield return (SatMasterSlider, HslChannelNames.Master, HslField.Saturation);
+        yield return (SatRedSlider, HslChannelNames.Red, HslField.Saturation);
+        yield return (SatOrangeSlider, HslChannelNames.Orange, HslField.Saturation);
+        yield return (SatYellowSlider, HslChannelNames.Yellow, HslField.Saturation);
+        yield return (SatGreenSlider, HslChannelNames.Green, HslField.Saturation);
+        yield return (SatCyanSlider, HslChannelNames.Cyan, HslField.Saturation);
+        yield return (SatBlueSlider, HslChannelNames.Blue, HslField.Saturation);
+        yield return (SatPurpleSlider, HslChannelNames.Purple, HslField.Saturation);
+        yield return (SatMagentaSlider, HslChannelNames.Magenta, HslField.Saturation);
+
+        yield return (LightMasterSlider, HslChannelNames.Master, HslField.Lightness);
+        yield return (LightRedSlider, HslChannelNames.Red, HslField.Lightness);
+        yield return (LightOrangeSlider, HslChannelNames.Orange, HslField.Lightness);
+        yield return (LightYellowSlider, HslChannelNames.Yellow, HslField.Lightness);
+        yield return (LightGreenSlider, HslChannelNames.Green, HslField.Lightness);
+        yield return (LightCyanSlider, HslChannelNames.Cyan, HslField.Lightness);
+        yield return (LightBlueSlider, HslChannelNames.Blue, HslField.Lightness);
+        yield return (LightPurpleSlider, HslChannelNames.Purple, HslField.Lightness);
+        yield return (LightMagentaSlider, HslChannelNames.Magenta, HslField.Lightness);
+    }
+
+    /// <summary>加载所有 HSL 滑块的值（静默，不触发外部事件）。
+    /// 按各滑块范围夹紧旧值，并写回模型，保证着色器实际应用的值与滑块显示一致。</summary>
+    private void LoadHslSliders(FilterSettings s)
+    {
+        foreach (var (slider, channel, field) in AllHslSliders())
+        {
+            double v = Math.Clamp(ChannelValue(s, channel, field), slider.Minimum, slider.Maximum);
+            SetHslValue(s, channel, field, v);
+            slider.SetValueSilently(v);
+        }
+    }
+
+    /// <summary>把所有 HSL 恢复为默认值（中性，不产生任何效果）。</summary>
+    private void HslReset_Click(object sender, RoutedEventArgs e)
+    {
+        var s = _data.Current;
+        s.Hue = 0;
+        s.HslSaturation = 100;
+        s.Lightness = 0;
+        foreach (var ch in s.HslChannels)
+        {
+            ch.Hue = 0;
+            ch.Saturation = 100;
+            ch.Lightness = 0;
+        }
+        LoadHslSliders(s);
+        ScheduleApply();
+        _saveTimer.Stop();
+        _saveTimer.Start();
     }
 
     // ---------------- 开关与预设 ----------------
@@ -368,7 +936,15 @@ public sealed partial class MainWindow : Window
             _hotkeys.Unregister(id);
             _profileHotkeyIds.Remove(p);
         }
+        int removedIndex = _profiles.IndexOf(p);
         _profiles.Remove(p);
+        // 清理/修正按应用绑定中指向被删配置的引用
+        foreach (var b in _data.AppBindings)
+        {
+            if (b.ProfileIndex == removedIndex) b.ProfileIndex = -1;
+            else if (b.ProfileIndex > removedIndex) b.ProfileIndex--;
+        }
+        RefreshBindingList();
         SaveState();
     }
 
