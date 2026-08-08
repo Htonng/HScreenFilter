@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 # 脚本位于 releases\package.ps1，项目根是它的上两级（releases 的父目录）
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$ver = '1.2.4'
+$ver = '1.2.5'
 $releaseTag = "v$ver"
 
 # Locate tools
