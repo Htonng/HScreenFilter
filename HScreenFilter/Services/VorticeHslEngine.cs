@@ -58,11 +58,11 @@ internal sealed class VorticeHslEngine : IDisposable
     private volatile bool _disposed;
     private volatile bool _capturable; // 覆盖层可被 OBS 等屏幕捕获（WDA_MONITOR，DXGI 自捕获排除=防自反馈）
 
-    // 着色器参数（与 HLSL cbuffer 顺序一致，36 个 float = 144 字节，16 字节对齐：
-    //   0..32 滤镜参数，33..35 padding）
+    // 着色器参数（与 HLSL cbuffer 顺序一致，40 个 float = 160 字节，16 字节对齐：
+    //   0..32 滤镜参数，33..36 光标排除参数，37..39 padding）
     private readonly object _paramsLock = new();
-    private readonly float[] _params = new float[36];
-    private readonly float[] _paramsCopy = new float[36];
+    private readonly float[] _params = new float[40];
+    private readonly float[] _paramsCopy = new float[40];
 
     // 帧率节流：Present(0) 无 vsync；桌面无变化时 AcquireNextFrame(100ms) 自然兜底，
     // 动态画面不设上限（MinFrameIntervalMs=0 = 不节流，用户要求解锁帧率）
@@ -71,6 +71,9 @@ internal sealed class VorticeHslEngine : IDisposable
 
     // 捕获重建锁：保护 _duplication 跨线程重建
     private readonly object _captureLock = new();
+
+    // 光标排除：排除区半宽（像素），>0 时启用；略大于默认 32x32 光标避免边缘残留
+    private const float CursorHalfSize = 24f;
 
     public string? LastError { get; private set; }
 
@@ -145,8 +148,8 @@ internal sealed class VorticeHslEngine : IDisposable
                 p[idx++] = ch == null ? 1f : (float)(ch.Saturation / 100.0);   // Sat
                 p[idx++] = ch == null ? 0f : (float)(ch.Lightness / 100.0);    // Light
             }
-            // 补齐 padding（33..35），与 HLSL float4 对齐
-            for (; idx < 36; idx++) p[idx] = 0f;
+            // 滤镜参数填到 0..32；33..36 光标参数由渲染线程每帧更新，37..39 padding（数组初始为 0）
+            for (; idx < 33; idx++) p[idx] = 0f;
         }
     }
 
@@ -306,9 +309,9 @@ internal sealed class VorticeHslEngine : IDisposable
             new BufferDescription((uint)(vertices.Length * sizeof(float)), BindFlags.VertexBuffer));
         _context.UpdateSubresource(vertices, _vertexBuffer);
 
-        // 常量缓冲：36 个 float = 144 字节（0..32 滤镜参数 + 33..35 padding）
+        // 常量缓冲：40 个 float = 160 字节（0..32 滤镜参数 + 33..36 光标排除 + 37..39 padding）
         _constantBuffer = _device.CreateBuffer(
-            new BufferDescription(36 * sizeof(float), BindFlags.ConstantBuffer));
+            new BufferDescription(40 * sizeof(float), BindFlags.ConstantBuffer));
 
         // 帧纹理（GPU 内拷贝目标）+ SRV
         var texDesc = new Texture2DDescription
@@ -431,6 +434,7 @@ internal sealed class VorticeHslEngine : IDisposable
         float[] local;
         lock (_paramsLock)
         {
+            UpdateCursorParamsLocked();
             Array.Copy(_params, _paramsCopy, _params.Length);
             local = _paramsCopy;
         }
@@ -505,6 +509,27 @@ internal sealed class VorticeHslEngine : IDisposable
         return (r, g, b, a);
     }
 
+    /// <summary>更新光标排除参数（必须在 _paramsLock 内调用）。
+    /// HLSL cbuffer 打包：滤镜参数 0..32 后紧跟 CursorX=33、CursorY=34、CursorHalfW=35、CursorHalfH=36
+    /// （32..35 落在同一 float4 寄存器，36 在下一寄存器）。</summary>
+    private void UpdateCursorParamsLocked()
+    {
+        var pt = new OverlayNative.POINT();
+        if (OverlayNative.GetCursorPos(ref pt))
+        {
+            // 覆盖窗口铺满主显示器且位于 (0,0)，屏幕物理像素 = 窗口/帧像素
+            _params[33] = pt.X;
+            _params[34] = pt.Y;
+            _params[35] = CursorHalfSize;
+            _params[36] = CursorHalfSize;
+        }
+        else
+        {
+            _params[35] = -1f; // 负半宽 = 禁用光标排除
+            _params[36] = -1f;
+        }
+    }
+
     // ---------------- 像素着色器源码 ----------------
 
     /// <summary>逐像素 HSL 分色系着色器（与 Win2D 版逻辑一致，签名改为标准 D3D11）。</summary>
@@ -531,6 +556,7 @@ internal sealed class VorticeHslEngine : IDisposable
             float HueB, SatB, LightB;
             float HueP, SatP, LightP;
             float HueM, SatM, LightM;
+            float CursorX, CursorY, CursorHalfW, CursorHalfH;
         };
 
         float wrapHue(float h)
@@ -595,6 +621,16 @@ internal sealed class VorticeHslEngine : IDisposable
         float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
         {
             float4 color = InputTexture.Sample(InputSampler, uv);
+
+            // 光标排除：DXGI 捕获若含软件指针，此区域原样输出，避免滤镜给鼠标指针着色/残影
+            if (CursorHalfW > 0.0)
+            {
+                uint tw, th;
+                InputTexture.GetDimensions(tw, th);
+                float2 px = uv * float2((float)tw, (float)th);
+                if (abs(px.x - CursorX) <= CursorHalfW && abs(px.y - CursorY) <= CursorHalfH)
+                    return float4(color.rgb, 1.0);
+            }
 
             float3 c = color.rgb;
 
