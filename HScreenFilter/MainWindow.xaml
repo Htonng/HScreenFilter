@@ -345,7 +345,7 @@
                                   OnContent="可捕获" OffContent="排除捕获" Toggled="CaptureSwitch_Toggled"/>
                     <TextBlock FontSize="11" TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               Text="开启可捕获后，滤镜效果可被 OBS 等屏幕捕获（覆盖层自动从自身捕获排除，防止自反馈）。OBS 建议使用「显示器捕获（WGC）」或「窗口捕获」选择滤镜层窗口。"/>
+                               Text="开启后可被 OBS 等屏幕捕获：OBS 请用「显示器捕获（WGC 模式）」即可同时录到滤镜效果与 UI；不要用「窗口捕获」（WinUI 窗口 / 覆盖层用窗口捕获会黑屏或选不到）。"/>
 
                     <ToggleSwitch x:Name="AutoStartSwitch" Header="开机自动启动" Toggled="AutoStartSwitch_Toggled"/>
                 </StackPanel>

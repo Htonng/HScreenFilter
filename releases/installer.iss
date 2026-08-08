@@ -1,6 +1,6 @@
-; HScreenFilter v1.0.0 安装程序脚本 (Inno Setup 6)
+; HScreenFilter v1.2.4 安装程序脚本 (Inno Setup 6)
 #define MyAppName "HScreenFilter"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.2.4"
 #define MyAppPublisher "HScreenFilter"
 #define MyAppExeName "HScreenFilter.exe"
 
@@ -27,8 +27,8 @@ PrivilegesRequiredOverridesAllowed=dialog
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-; 安装所有自包含部署产物（相对本项目 releases 目录的路径）
-Source: "v1.0.0\portable\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 安装所有自包含部署产物（相对本项目 releases 目录的路径，版本自动跟随 MyAppVersion）
+Source: "v{#MyAppVersion}\portable\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
