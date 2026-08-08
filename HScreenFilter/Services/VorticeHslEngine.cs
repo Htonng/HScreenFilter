@@ -625,16 +625,7 @@ internal sealed class VorticeHslEngine : IDisposable
         {
             float4 color = InputTexture.Sample(InputSampler, uv);
 
-            // 光标排除：DXGI 捕获若含软件指针，此区域原样输出，避免滤镜给鼠标指针着色/残影
-            if (CursorHalfW > 0.0)
-            {
-                uint tw, th;
-                InputTexture.GetDimensions(tw, th);
-                float2 px = uv * float2((float)tw, (float)th);
-                if (abs(px.x - CursorX) <= CursorHalfW && abs(px.y - CursorY) <= CursorHalfH)
-                    return float4(color.rgb, 1.0);
-            }
-
+            // 光标排除已移除：光标与画面一起被滤镜正常处理（不再做剔除，避免方框/光晕影响体验）
             float3 c = color.rgb;
 
             float h, s, l;
