@@ -81,23 +81,27 @@ public static class HslChannelNames
 {
     public const string Master = "全部";
     public const string Red = "红";
+    public const string Orange = "橙";
     public const string Yellow = "黄";
     public const string Green = "绿";
     public const string Cyan = "青";
     public const string Blue = "蓝";
+    public const string Purple = "紫";
     public const string Magenta = "品红";
 
-    /// <summary>六个可选的具体色系名称。</summary>
-    public static readonly string[] ColorNames = { Red, Yellow, Green, Cyan, Blue, Magenta };
+    /// <summary>八个可选的具体色系名称（红/橙/黄/绿/青/蓝/紫/品红）。</summary>
+    public static readonly string[] ColorNames = { Red, Orange, Yellow, Green, Cyan, Blue, Purple, Magenta };
 
     /// <summary>按名称取重心色相（度）。"全部"返回 0。</summary>
     public static double ReferenceHue(string name) => name switch
     {
         Red => 0,
+        Orange => 30,
         Yellow => 60,
         Green => 120,
         Cyan => 180,
         Blue => 240,
+        Purple => 270,
         Magenta => 300,
         _ => 0,
     };

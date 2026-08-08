@@ -115,15 +115,28 @@ public sealed partial class FilterSlider : UserControl
             ValueText.Text = Math.Round(Value).ToString();
     }
 
-    // 直接在数值框输入并回车：把输入提交为合法数值。
+    // 直接在数值框输入并回车：把输入提交为合法数值，并关闭输入框（移走焦点、光标消失）。
+    // 按 Esc：取消本次修改，恢复为当前生效值并关闭输入框。
+    // 点击空白处同样会触发 LostFocus → CommitValueText，自动应用并关闭输入框。
     private void ValueText_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         if (e.Key == Windows.System.VirtualKey.Enter)
         {
             CommitValueText();
+            CloseInputBox();
+            e.Handled = true;
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            // 取消修改：恢复为当前生效值
+            ValueText.Text = Math.Round(Value).ToString();
+            CloseInputBox();
             e.Handled = true;
         }
     }
+
+    /// <summary>关闭输入框：把焦点还给滑块，光标不再闪烁，下次点击数值框再进入编辑。</summary>
+    private void CloseInputBox() => Slider.Focus(FocusState.Programmatic);
 
     // 失焦时提交；若输入非法则回退为当前值。
     private void ValueText_LostFocus(object sender, RoutedEventArgs e)

@@ -18,7 +18,7 @@ Push-Location (Join-Path $root 'HScreenFilter')
 try { & $dotnet build HScreenFilter.csproj -c Release } finally { Pop-Location }
 if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed.' }
 
-$src = Join-Path $root "HScreenFilter\bin\Release\net8.0-windows10.0.19041.0\win-x64"
+$src = Join-Path $root "HScreenFilter\bin\Release\net8.0-windows10.0.26100.0\win-x64"
 $releaseDir = Join-Path $root "releases\$releaseTag"
 
 # 2) Prepare portable folder

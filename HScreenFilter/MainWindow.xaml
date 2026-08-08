@@ -3,31 +3,43 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:HScreenFilter.Controls"
-    Title="屏幕滤镜">
+    Title="HScreenFilter">
 
     <!-- 整页滚动：窗口较小时可上下滚动查看全部内容（滑块 + 配置 + 开机自启） -->
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                   ZoomMode="Disabled">
-        <Grid x:Name="RootGrid" KeyDown="RootGrid_KeyDown" IsTabStop="True">
+        <Grid x:Name="RootGrid" KeyDown="RootGrid_KeyDown" IsTabStop="True"
+              UseSystemFocusVisuals="False">
             <Grid.RowDefinitions>
+                <RowDefinition Height="32"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
+            <!-- ============ 标题栏（毛玻璃可拖动区域，右侧留给系统按钮） ============ -->
+            <Grid x:Name="TitleBarArea" Grid.Row="0" Padding="16,0,150,0" Background="Transparent">
+                <TextBlock Text="屏幕滤镜" VerticalAlignment="Center" FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsHitTestVisible="False"/>
+            </Grid>
+
             <!-- ============ 头部 ============ -->
-            <Border Grid.Row="0"
+            <Border Grid.Row="1"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="16"
                     Padding="20,16"
-                    Margin="24,16,24,12">
+                    Margin="24,4,24,12">
                 <StackPanel Spacing="8">
                     <TextBlock Text="HScreenFilter" Style="{StaticResource TitleTextBlockStyle}"/>
-                    <TextBlock x:Name="StatusText" FontSize="12"
-                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                              Text="正在初始化…"/>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock x:Name="StatusText" FontSize="12" VerticalAlignment="Center"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                  Text="正在初始化…"/>
+                        <HyperlinkButton x:Name="DebugLogButton" Content="调试日志" FontSize="11"
+                                         VerticalAlignment="Center" Click="DebugLogButton_Click"/>
+                    </StackPanel>
                     <Grid ColumnSpacing="12">
                         <Grid.ColumnDefinitions>
                            <ColumnDefinition Width="Auto"/>
@@ -51,11 +63,11 @@
             </Border>
 
             <!-- ============ 滑块与预设 ============ -->
-            <Grid Grid.Row="1">
+            <Grid Grid.Row="2">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Padding="24,4,24,8" Spacing="12">
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="16"
                                 Padding="20,16"
@@ -92,45 +104,107 @@
                         </Border>
 
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
-                                BorderThickness="2"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
                                 CornerRadius="16"
                                 Padding="20,16"
                                 Margin="0,0,0,12">
                            <StackPanel Spacing="12">
                                <StackPanel Spacing="4">
                                    <TextBlock Text="🎨 HSL 调色盘" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                   <TextBlock Text="像 Photoshop 一样，先选择要调整的色系，再分别精细调整其色相、饱和度、明度。"
+                                   <TextBlock Text="像 Photoshop 一样，按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。"
                                               FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
                                </StackPanel>
 
-                               <!-- 色系选择：全部(主) / 红 / 黄 / 绿 / 青 / 蓝 / 品红 -->
-                               <ComboBox x:Name="HslChannelCombo"
-                                         Header="选择色系（子菜单）"
-                                         SelectionChanged="HslChannelCombo_SelectionChanged"
-                                         HorizontalAlignment="Stretch">
-                                   <ComboBoxItem Content="全部（主）" Tag="全部"/>
-                                   <ComboBoxItem Content="红 Red" Tag="红"/>
-                                   <ComboBoxItem Content="黄 Yellow" Tag="黄"/>
-                                   <ComboBoxItem Content="绿 Green" Tag="绿"/>
-                                   <ComboBoxItem Content="青 Cyan" Tag="青"/>
-                                   <ComboBoxItem Content="蓝 Blue" Tag="蓝"/>
-                                   <ComboBoxItem Content="品红 Magenta" Tag="品红"/>
-                               </ComboBox>
+                               <!-- DXGI 引擎开关：开启才能使用 HSL 调色（关闭用放大镜 API，HSL 不可用） -->
+                               <ToggleSwitch x:Name="DxgiSwitch" Header="DXGI 引擎开关"
+                                             OnContent="DXGI 开启（支持 HSL）" OffContent="DXGI 关闭（放大镜引擎）"
+                                             Toggled="DxgiSwitch_Toggled"/>
 
-                               <StackPanel Spacing="12">
-                                   <controls:FilterSlider x:Name="HueSlider" Header="色相 Hue" Minimum="-180" Maximum="180"
-                                                          Spectrum="#FF0000,#FFFF00,#00FF00,#00FFFF,#0000FF,#FF00FF,#FF0000"/>
-                                   <controls:FilterSlider x:Name="HslSaturationSlider" Header="饱和度 Saturation" Minimum="0" Maximum="200"
-                                                          Spectrum="#808080,#FF0000"/>
-                                   <controls:FilterSlider x:Name="LightnessSlider" Header="明度 Lightness" Minimum="-100" Maximum="100"
-                                                          Spectrum="#000000,#808080,#FFFFFF"/>
+                               <!-- 色相 / 饱和度 / 明亮度 三个子区域，各 8 个色系 + 全部(主) -->
+                               <Pivot x:Name="HslPivot" Margin="0,0,0,4">
+                                   <!-- 色相（各色系微调 ±60°：两端极值 = 相邻两个色系的颜色，中间 = 本色系） -->
+                                   <PivotItem Header="色相">
+                                       <StackPanel Spacing="10" Margin="0,8,0,0">
+                                           <controls:FilterSlider x:Name="HueMasterSlider" Header="全部（主）" Minimum="-180" Maximum="180"
+                                                                  Spectrum="#FF0000,#FF8000,#FFFF00,#00FF00,#00FFFF,#0000FF,#8000FF,#FF00FF,#FF0000"/>
+                                           <!-- 各色系色相统一 ±30° 微调 -->
+                                           <controls:FilterSlider x:Name="HueRedSlider" Header="红" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#FF00FF,#FF0000,#FF8000"/>
+                                           <controls:FilterSlider x:Name="HueOrangeSlider" Header="橙" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#FF0000,#FF8000,#FFFF00"/>
+                                           <controls:FilterSlider x:Name="HueYellowSlider" Header="黄" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#FF8000,#FFFF00,#00FF00"/>
+                                           <controls:FilterSlider x:Name="HueGreenSlider" Header="绿" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#FFFF00,#00FF00,#00FFFF"/>
+                                           <controls:FilterSlider x:Name="HueCyanSlider" Header="青" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#00FF00,#00FFFF,#0000FF"/>
+                                           <controls:FilterSlider x:Name="HueBlueSlider" Header="蓝" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#00FFFF,#0000FF,#8000FF"/>
+                                           <controls:FilterSlider x:Name="HuePurpleSlider" Header="紫" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#0000FF,#8000FF,#FF00FF"/>
+                                           <controls:FilterSlider x:Name="HueMagentaSlider" Header="品红" Minimum="-30" Maximum="30"
+                                                                  Spectrum="#8000FF,#FF00FF,#FF0000"/>
+                                       </StackPanel>
+                                   </PivotItem>
+
+                                   <!-- 饱和度（灰 → 本色） -->
+                                   <PivotItem Header="饱和度">
+                                       <StackPanel Spacing="10" Margin="0,8,0,0">
+                                           <controls:FilterSlider x:Name="SatMasterSlider" Header="全部（主）" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#FF0000"/>
+                                           <controls:FilterSlider x:Name="SatRedSlider" Header="红" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#FF0000"/>
+                                           <controls:FilterSlider x:Name="SatOrangeSlider" Header="橙" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#FF8000"/>
+                                           <controls:FilterSlider x:Name="SatYellowSlider" Header="黄" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#FFFF00"/>
+                                           <controls:FilterSlider x:Name="SatGreenSlider" Header="绿" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#00FF00"/>
+                                           <controls:FilterSlider x:Name="SatCyanSlider" Header="青" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#00FFFF"/>
+                                           <controls:FilterSlider x:Name="SatBlueSlider" Header="蓝" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#0000FF"/>
+                                           <controls:FilterSlider x:Name="SatPurpleSlider" Header="紫" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#8000FF"/>
+                                           <controls:FilterSlider x:Name="SatMagentaSlider" Header="品红" Minimum="0" Maximum="200"
+                                                                  Spectrum="#808080,#FF00FF"/>
+                                       </StackPanel>
+                                   </PivotItem>
+
+                                   <!-- 明亮度（黑 → 灰 → 白，范围 -10..10 微调） -->
+                                   <PivotItem Header="明亮度">
+                                       <StackPanel Spacing="10" Margin="0,8,0,0">
+                                           <controls:FilterSlider x:Name="LightMasterSlider" Header="全部（主）" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightRedSlider" Header="红" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightOrangeSlider" Header="橙" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightYellowSlider" Header="黄" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightGreenSlider" Header="绿" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightCyanSlider" Header="青" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightBlueSlider" Header="蓝" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightPurpleSlider" Header="紫" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                           <controls:FilterSlider x:Name="LightMagentaSlider" Header="品红" Minimum="-10" Maximum="10"
+                                                                  Spectrum="#000000,#808080,#FFFFFF"/>
+                                       </StackPanel>
+                                   </PivotItem>
+                               </Pivot>
+
+                               <StackPanel Orientation="Horizontal" Spacing="8">
+                                   <Button Content="默认值" Click="HslReset_Click"/>
                                </StackPanel>
 
                                <TextBlock x:Name="HslChannelHint" FontSize="11"
                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                           TextWrapping="Wrap"
-                                          Text="提示：当前引擎为整屏单矩阵，具体色系的调整是对全局的近似模拟，主次效果按所选色系体现。"/>
+                                          Text="提示：当前为整屏单矩阵，具体色系的调整是对全局的近似模拟，主次效果按所选色系体现。"/>
                            </StackPanel>
                         </Border>
 
@@ -153,23 +227,32 @@
                                <ToggleSwitch x:Name="PerAppSwitch" Header="启用按应用切换"
                                              OnContent="已启用" OffContent="已关闭"
                                              Toggled="PerAppSwitch_Toggled"/>
-                               <Grid ColumnSpacing="8">
-                                   <Grid.ColumnDefinitions>
-                                       <ColumnDefinition Width="Auto"/>
-                                       <ColumnDefinition Width="*"/>
-                                   </Grid.ColumnDefinitions>
-                                   <Grid.RowDefinitions>
-                                       <RowDefinition Height="Auto"/>
-                                       <RowDefinition Height="Auto"/>
-                                   </Grid.RowDefinitions>
-                                   <TextBlock Grid.Row="0" Grid.Column="0" Text="进程名" VerticalAlignment="Center"/>
-                                   <TextBox Grid.Row="0" Grid.Column="1" x:Name="PerAppProcessBox"
-                                            PlaceholderText="例如 notepad 或 chrome" TextChanged="PerAppProcessBox_TextChanged"/>
-                                   <TextBlock Grid.Row="1" Grid.Column="0" Text="窗口标题" VerticalAlignment="Center" Margin="0,4,0,0"/>
-                                   <TextBox Grid.Row="1" Grid.Column="1" x:Name="PerAppTitleBox"
-                                            PlaceholderText="标题包含的文字（可选，如 notepad 可不填）" TextChanged="PerAppTitleBox_TextChanged"/>
-                               </Grid>
-                               <Button x:Name="PickForegroundButton" Content="选择当前前台应用" Click="PickForegroundButton_Click"/>
+                               <ListView x:Name="AppBindingList" Height="132" SelectionMode="None" Margin="0,4,0,0">
+                                   <ListView.ItemTemplate>
+                                       <DataTemplate>
+                                           <Grid ColumnSpacing="10" Padding="0,4">
+                                               <Grid.ColumnDefinitions>
+                                                   <ColumnDefinition Width="*"/>
+                                                   <ColumnDefinition Width="Auto"/>
+                                                   <ColumnDefinition Width="Auto"/>
+                                               </Grid.ColumnDefinitions>
+                                               <StackPanel Spacing="2" VerticalAlignment="Center">
+                                                   <TextBlock Text="{Binding DisplayName}"/>
+                                                   <TextBlock Text="{Binding ProfileDisplay}" FontSize="11"
+                                                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                               </StackPanel>
+                                               <Button Grid.Column="1" Content="编辑" FontSize="11" Padding="8,4"
+                                                       Click="EditBinding_Click"/>
+                                               <Button Grid.Column="2" Content="删除" FontSize="11" Padding="8,4"
+                                                       Click="DeleteBinding_Click"/>
+                                           </Grid>
+                                       </DataTemplate>
+                                   </ListView.ItemTemplate>
+                               </ListView>
+                               <StackPanel Orientation="Horizontal" Spacing="8">
+                                   <Button Content="添加应用…" Click="AddBinding_Click"/>
+                                   <Button x:Name="PickForegroundButton" Content="用当前前台应用添加" Click="PickForegroundButton_Click"/>
+                               </StackPanel>
                                <TextBlock x:Name="PerAppStatus" FontSize="12"
                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text=""/>
                            </StackPanel>
@@ -179,7 +262,7 @@
             </Grid>
 
             <!-- ============ 配置文件与快捷键 ============ -->
-            <Border Grid.Row="2"
+            <Border Grid.Row="3"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
@@ -249,6 +332,20 @@
 
                     <TextBlock x:Name="CaptureHint" FontSize="12"
                               Foreground="{ThemeResource SystemFillColorCautionBrush}" Text=""/>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="界面主题" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ThemeComboBox" MinWidth="150" SelectionChanged="ThemeComboBox_SelectionChanged">
+                            <ComboBoxItem Content="默认主题" Tag="default"/>
+                            <ComboBoxItem Content="Mica 主题" Tag="mica"/>
+                        </ComboBox>
+                    </StackPanel>
+
+                    <ToggleSwitch x:Name="CaptureSwitch" Header="UI 与滤镜层可被 OBS 捕获"
+                                  OnContent="可捕获" OffContent="排除捕获" Toggled="CaptureSwitch_Toggled"/>
+                    <TextBlock FontSize="11" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="开启可捕获后，滤镜效果可被 OBS 等屏幕捕获（覆盖层自动从自身捕获排除，防止自反馈）。OBS 建议使用「显示器捕获（WGC）」或「窗口捕获」选择滤镜层窗口。"/>
 
                     <ToggleSwitch x:Name="AutoStartSwitch" Header="开机自动启动" Toggled="AutoStartSwitch_Toggled"/>
                 </StackPanel>

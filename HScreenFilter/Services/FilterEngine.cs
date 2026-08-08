@@ -30,6 +30,7 @@ public struct MAGCOLOREFFECT
 public enum FilterEngineKind
 {
     None,
+    PixelShader,          // 逐像素着色器（能力最强：真正的分色系 HSL）
     FullScreenColorEffect,
     GammaRamp,
 }
@@ -42,6 +43,7 @@ public static class FilterEngine
 {
     private static readonly object _lock = new();
     private static bool _checked;
+    private static bool _useDxgi;           // 是否使用 DXGI 捕获引擎（开启=HSL 可用）
     private static bool _magInitialized;
     private static FilterEngineKind _kind = FilterEngineKind.None;
 
@@ -55,7 +57,49 @@ public static class FilterEngine
 
     public static string LastError { get; private set; } = "";
 
-    public static bool SupportsSaturation => _kind == FilterEngineKind.FullScreenColorEffect;
+    /// <summary>是否启用 DXGI 捕获引擎（开启时 HSL 才可用）。</summary>
+    public static bool UseDxgi
+    {
+        get { lock (_lock) return _useDxgi; }
+        set { lock (_lock) SetUseDxgi(value); }
+    }
+
+    public static bool SupportsSaturation =>
+        _kind is FilterEngineKind.FullScreenColorEffect or FilterEngineKind.PixelShader;
+
+    /// <summary>
+    /// 设置引擎模式并重新探测：
+    ///   true  → 逐像素着色器引擎（DXGI 捕获，支持分色系 HSL）；
+    ///   false → 放大镜颜色矩阵引擎（不支持分色系 HSL）。
+    /// 切换时会先停止当前引擎，再重新初始化。
+    /// </summary>
+    private static void SetUseDxgi(bool useDxgi)
+    {
+        if (_useDxgi == useDxgi) return;
+        _useDxgi = useDxgi;
+
+        // 停止当前引擎
+        ShaderFilterEngine.Stop();
+        StopMag();
+        try { GammaRampEngine.Reset(); } catch { }
+
+        // 强制重新探测
+        _checked = false;
+        _kind = FilterEngineKind.None;
+    }
+
+    private static void StopMag()
+    {
+        if (!_magInitialized) return;
+        try
+        {
+            var m = MAGCOLOREFFECT.Identity();
+            MagSetFullscreenColorEffect(ref m);
+        }
+        catch { }
+        try { MagUninitialize(); } catch { }
+        _magInitialized = false;
+    }
 
     [DllImport("Magnification.dll", SetLastError = true)]
     private static extern bool MagInitialize();
@@ -74,7 +118,19 @@ public static class FilterEngine
             if (_checked) return _kind != FilterEngineKind.None;
             _checked = true;
 
-            // 全屏颜色效果需要 Windows 10 1903 (build 18362) 及以上。
+            // 开启 DXGI → 逐像素着色器引擎（HSL 可用）；否则跳过，直接用放大镜/伽马引擎
+            if (_useDxgi)
+            {
+                // 这里只做轻量探测（编译着色器 + 创建设备），覆盖层与捕获在首次 Apply 时才建立。
+                if (ShaderFilterEngine.Initialize())
+                {
+                    _kind = FilterEngineKind.PixelShader;
+                    return true;
+                }
+                LastError = "DXGI 着色器引擎不可用：" + ShaderFilterEngine.LastError + "，已回退到放大镜引擎";
+            }
+
+            // 2) 全屏颜色矩阵（需要 Windows 10 1903+）。
             if (Environment.OSVersion.Version.Build >= 18362)
             {
                 try
@@ -107,6 +163,7 @@ public static class FilterEngine
                 LastError = "Windows 10 1903+ 才支持全屏颜色效果";
             }
 
+            // 3) 回退：显卡伽马曲线
             if (GammaRampEngine.Test())
             {
                 _kind = FilterEngineKind.GammaRamp;
@@ -118,11 +175,42 @@ public static class FilterEngine
         }
     }
 
+    /// <summary>确保放大镜颜色矩阵引擎就绪（供着色器引擎回退时使用）。</summary>
+    private static bool EnsureMagReady()
+    {
+        if (_magInitialized) return true;
+        if (Environment.OSVersion.Version.Build < 18362) return false;
+        try
+        {
+            if (MagInitialize())
+            {
+                _magInitialized = true;
+                var id = MAGCOLOREFFECT.Identity();
+                MagSetFullscreenColorEffect(ref id);
+                return true;
+            }
+        }
+        catch
+        {
+            // 忽略，交给上层报错
+        }
+        return false;
+    }
+
     public static bool Apply(FilterSettings s)
     {
         if (!Initialize()) return false;
         lock (_lock)
         {
+            if (_kind == FilterEngineKind.PixelShader)
+            {
+                if (ShaderFilterEngine.Apply(s)) return true;
+
+                // 覆盖层/捕获建立失败 → 回退到颜色矩阵/伽马引擎
+                LastError = "逐像素着色器引擎不可用，已回退：" + ShaderFilterEngine.LastError;
+                _kind = EnsureMagReady() ? FilterEngineKind.FullScreenColorEffect : FilterEngineKind.GammaRamp;
+            }
+
             if (_kind == FilterEngineKind.FullScreenColorEffect)
             {
                 var m = BuildMatrix(s);
@@ -139,6 +227,11 @@ public static class FilterEngine
         if (!Initialize()) return false;
         lock (_lock)
         {
+            if (_kind == FilterEngineKind.PixelShader)
+            {
+                ShaderFilterEngine.Stop();
+                return true;
+            }
             if (_kind == FilterEngineKind.FullScreenColorEffect)
             {
                 var m = MAGCOLOREFFECT.Identity();
@@ -150,10 +243,14 @@ public static class FilterEngine
         }
     }
 
+    /// <summary>设置滤镜覆盖层是否可被屏幕捕获（OBS 等）。仅 DXGI 引擎有覆盖层窗口。</summary>
+    public static void SetOverlayCapturable(bool capturable) => ShaderFilterEngine.SetOverlayCapturable(capturable);
+
     public static void Shutdown()
     {
         lock (_lock)
         {
+            ShaderFilterEngine.Shutdown();
             if (_magInitialized)
             {
                 try
