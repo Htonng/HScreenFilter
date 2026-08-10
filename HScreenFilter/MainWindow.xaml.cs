@@ -54,9 +54,137 @@ public sealed partial class MainWindow : Window
 
     /// <summary>当前处于激活状态（开关打开）的配置；没有则返回 null（此时为临时配置）。</summary>
     private Profile? ActiveProfile =>
-        _data.ActiveProfileIndex >= 0 && _data.ActiveProfileIndex < _profiles.Count
-            ? _profiles[_data.ActiveProfileIndex]
+        CurrentDisplay.ActiveProfileIndex >= 0 && CurrentDisplay.ActiveProfileIndex < _profiles.Count
+            ? _profiles[CurrentDisplay.ActiveProfileIndex]
             : null;
+
+    // ---------------- 多显示器 ----------------
+    private readonly List<DisplayMonitor> _monitors = new();       // 当前枚举到的显示器
+    private int _currentDisplayIndex;                               // 界面当前选中的显示器索引
+    private bool _displayInit;                                      // 避免恢复状态时触发 UI 事件
+
+    /// <summary>当前选中的显示器状态（每显示器独立状态，索引与 _monitors 对齐）。</summary>
+    private DisplayState CurrentDisplay => EnsureDisplay(_currentDisplayIndex);
+
+    /// <summary>确保指定索引的显示器状态存在（缺失则创建，索引越界则回退到主显示器）。</summary>
+    private DisplayState EnsureDisplay(int index)
+    {
+        if (index < 0 || index >= _data.Displays.Count)
+            index = 0;
+        return _data.Displays[index];
+    }
+
+    /// <summary>枚举显示器、同步每显示器状态、填充显示器选择器。幂等（启动时调用一次）。</summary>
+    private void InitializeDisplays()
+    {
+        _monitors.Clear();
+        _monitors.AddRange(DisplayMonitorService.Enumerate());
+        if (_monitors.Count == 0)
+        {
+            // 兜底：枚举失败时至少有一个主显示器
+            _monitors.Add(new DisplayMonitor { X = 0, Y = 0, Width = 1920, Height = 1080, IsPrimary = true });
+        }
+
+        // 同步每显示器状态：确保 _data.Displays 与显示器数量一致
+        bool wasEmpty = _data.Displays.Count == 0; // 旧版本数据没有 Displays 字段 → 需要迁移
+        while (_data.Displays.Count < _monitors.Count)
+        {
+            _data.Displays.Add(new DisplayState { Index = _data.Displays.Count });
+        }
+        for (int i = 0; i < _data.Displays.Count && i < _monitors.Count; i++)
+            _data.Displays[i].Index = i;
+
+        // 向后兼容：旧版本只有一个全局显示器状态（Current/ActiveProfileIndex/IsEnabled），
+        // 把它迁移到主显示器（索引 0）的状态上，其余显示器用默认值。
+        if (wasEmpty)
+        {
+            var primary = _data.Displays[0];
+            if (_data.Current != null && !IsDefaultSettings(_data.Current)) primary.Current = _data.Current;
+            primary.ActiveProfileIndex = _data.ActiveProfileIndex;
+            primary.IsEnabled = _data.IsEnabled;
+        }
+
+        // 填充显示器选择器（主显示器排最前）
+        DisplayComboBox.Items.Clear();
+        foreach (var m in _monitors.OrderByDescending(x => x.IsPrimary))
+            DisplayComboBox.Items.Add(new ComboBoxItem { Content = m.Label, Tag = m });
+        // 默认选中主显示器
+        _currentDisplayIndex = _monitors.FindIndex(m => m.IsPrimary);
+        if (_currentDisplayIndex < 0) _currentDisplayIndex = 0;
+        _displayInit = true;
+        DisplayComboBox.SelectedIndex = _monitors.TakeWhile(m => !m.IsPrimary).Count(); // 主显示器在列表中的位置
+        _displayInit = false;
+    }
+
+    /// <summary>切换显示器选择：加载该显示器的独立状态（开关 + 激活配置 + 临时设置）到界面。</summary>
+    private void DisplayComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_displayInit) return;
+        if (DisplayComboBox.SelectedItem is not ComboBoxItem item || item.Tag is not DisplayMonitor m)
+            return;
+        int newIndex = _monitors.IndexOf(m);
+        if (newIndex < 0) return;
+        SwitchDisplay(newIndex);
+    }
+
+    /// <summary>阻止鼠标滚轮切换显示器（避免滚动页面时误触）。</summary>
+    private void DisplayComboBox_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    /// <summary>切换到指定显示器：把该显示器的独立状态加载进界面（开关 + 配置 n 选 1 + 滑块）。</summary>
+    private void SwitchDisplay(int index)
+    {
+        if (index < 0 || index >= _monitors.Count) return;
+        _currentDisplayIndex = index;
+        var d = _data.Displays[index];
+
+        // 恢复该显示器的激活配置（n 选 1）
+        _profileToggleInit = true;
+        foreach (var p in _profiles)
+            p.IsActive = false;
+        if (d.ActiveProfileIndex >= 0 && d.ActiveProfileIndex < _profiles.Count)
+            _profiles[d.ActiveProfileIndex].IsActive = true;
+        _profileToggleInit = false;
+
+        // 加载临时/激活配置的设置到滑块
+        _savedSnapshot = d.Current.Clone();
+        LoadSettingsIntoUi(d.Current);
+
+        // 每显示器独立开关
+        _displayInit = true;
+        DisplayEnableSwitch.IsOn = d.IsEnabled;
+        _displayInit = false;
+        UpdateDisplayEnableStatus();
+
+        // 恢复该显示器激活配置记忆的 DXGI（静默）
+        var ap = d.ActiveProfileIndex >= 0 && d.ActiveProfileIndex < _profiles.Count
+            ? _profiles[d.ActiveProfileIndex] : null;
+        if (ap != null) ApplyProfileDxgi(ap);
+        else { ApplyDxgiModeNoDialog(_data.UseDxgi); }
+
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>每显示器独立开关：切换当前显示器的启用状态并应用。</summary>
+    private void DisplayEnableSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_displayInit) return;
+        CurrentDisplay.IsEnabled = DisplayEnableSwitch.IsOn;
+        UpdateDisplayEnableStatus();
+        ApplyCurrent();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>更新开关后面的灰色小字（该显示器已启用/未启用）。</summary>
+    private void UpdateDisplayEnableStatus()
+    {
+        if (DisplayEnableStatusText == null) return;
+        DisplayEnableStatusText.Text = DisplayEnableSwitch.IsOn ? "该显示器已启用" : "该显示器未启用";
+    }
 
     public MainWindow()
     {
@@ -98,6 +226,9 @@ public sealed partial class MainWindow : Window
         foreach (var p in _data.Profiles)
             _profiles.Add(p);
 
+        // 多显示器：枚举显示器、同步每显示器状态、填充显示器选择器
+        InitializeDisplays();
+
         // 窗口装饰：按主题设置背景（默认无毛玻璃兼容老设备；Mica 为毛玻璃）
         ApplyWindowTheme(_data.Theme);
         _themeInit = true;
@@ -112,47 +243,56 @@ public sealed partial class MainWindow : Window
         // 需求 2：UI 置顶且不被 DXGI 滤镜捕获（UI 颜色不受滤镜影响）
         TryEnsureUiTopmost();
 
-        // 恢复 DXGI 开关状态，再初始化滤镜引擎
+        // 恢复 DXGI 开关状态：若有激活配置，用该配置记忆的 DXGI；否则用全局。再初始化滤镜引擎
+        bool startupUseDxgi = CurrentDisplay.ActiveProfileIndex >= 0 && CurrentDisplay.ActiveProfileIndex < _profiles.Count
+            ? _profiles[CurrentDisplay.ActiveProfileIndex].UseDxgi
+            : _data.UseDxgi;
         _dxgiInit = true;
-        DxgiSwitch.IsOn = _data.UseDxgi; // 触发 Toggled → 设置引擎模式
-        FilterEngine.UseDxgi = _data.UseDxgi;
+        DxgiSwitch.IsOn = startupUseDxgi; // 触发 Toggled → 设置引擎模式
+        FilterEngine.UseDxgi = startupUseDxgi;
+        _data.UseDxgi = startupUseDxgi;
         _dxgiInit = false;
         FilterEngine.Initialize();
         UpdateEngineStatus();
         RefreshHslEnabled();
 
         // 滑块事件
-        BrightnessSlider.ValueChangedExternal += (_, v) => { _data.Current.Brightness = v; ScheduleApply(); };
-        ContrastSlider.ValueChangedExternal += (_, v) => { _data.Current.Contrast = v; ScheduleApply(); };
-        SaturationSlider.ValueChangedExternal += (_, v) => { _data.Current.Saturation = v; ScheduleApply(); };
-        HighlightSlider.ValueChangedExternal += (_, v) => { _data.Current.Highlights = v; ScheduleApply(); };
-        ShadowSlider.ValueChangedExternal += (_, v) => { _data.Current.Shadows = v; ScheduleApply(); };
-        TemperatureSlider.ValueChangedExternal += (_, v) => { _data.Current.Temperature = v; ScheduleApply(); };
+        BrightnessSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Brightness = v; ScheduleApply(); };
+        ContrastSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Contrast = v; ScheduleApply(); };
+        SaturationSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Saturation = v; ScheduleApply(); };
+        HighlightSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Highlights = v; ScheduleApply(); };
+        ShadowSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Shadows = v; ScheduleApply(); };
+        TemperatureSlider.ValueChangedExternal += (_, v) => { CurrentDisplay.Current.Temperature = v; ScheduleApply(); };
         // HSL 面板：色相 / 饱和度 / 明亮度 三个子区域的全部滑块
         foreach (var (slider, channel, field) in AllHslSliders())
             WireHslSlider(slider, channel, field);
 
-        // 恢复上次激活的配置（开关 n 选 1）：有则加载其设置；无则用临时配置（下次启动恢复默认）
-        if (_data.ActiveProfileIndex >= 0 && _data.ActiveProfileIndex < _profiles.Count)
+        // 恢复主显示器上次激活的配置（开关 n 选 1）：有则加载其设置；无则用临时配置（下次启动恢复默认）
+        if (CurrentDisplay.ActiveProfileIndex >= 0 && CurrentDisplay.ActiveProfileIndex < _profiles.Count)
         {
             _profileToggleInit = true;
-            _profiles[_data.ActiveProfileIndex].IsActive = true;
+            _profiles[CurrentDisplay.ActiveProfileIndex].IsActive = true;
             _profileToggleInit = false;
-            _data.Current = _profiles[_data.ActiveProfileIndex].Settings.Clone();
+            CurrentDisplay.Current = _profiles[CurrentDisplay.ActiveProfileIndex].Settings.Clone();
         }
         else
         {
-            _data.Current = new FilterSettings();
+            CurrentDisplay.Current = new FilterSettings();
         }
-        _savedSnapshot = _data.Current.Clone();
+        _savedSnapshot = CurrentDisplay.Current.Clone();
 
-        LoadSettingsIntoUi(_data.Current);
+        LoadSettingsIntoUi(CurrentDisplay.Current);
 
         ProfileList.ItemsSource = _profiles;
         if (_data.SelectedProfileIndex >= 0 && _data.SelectedProfileIndex < _profiles.Count)
             ProfileList.SelectedIndex = _data.SelectedProfileIndex;
 
         AutoStartSwitch.IsOn = _data.AutoStart;
+        // 全局总开关（EnableSwitch）与每显示器独立开关（DisplayEnableSwitch）
+        _displayInit = true;
+        DisplayEnableSwitch.IsOn = CurrentDisplay.IsEnabled;
+        _displayInit = false;
+        UpdateDisplayEnableStatus();
         EnableSwitch.IsOn = _data.IsEnabled; // 触发 Toggled → 应用滤镜
         UpdateGlobalHotkeyBadge();
 
@@ -337,6 +477,25 @@ public sealed partial class MainWindow : Window
         _saveTimer.Start();
     }
 
+    /// <summary>在实色底上叠加白色，返回【不透明】的混合色（用于系统窗口按钮的悬停/按下状态）。</summary>
+    private static Windows.UI.Color BlendWithWhite(Windows.UI.Color baseColor, byte whiteAlpha)
+    {
+        try
+        {
+            float a = whiteAlpha / 255f;
+            return Windows.UI.Color.FromArgb(
+                255,
+                (byte)(baseColor.R + (255 - baseColor.R) * a),
+                (byte)(baseColor.G + (255 - baseColor.G) * a),
+                (byte)(baseColor.B + (255 - baseColor.B) * a));
+        }
+        catch
+        {
+            // 兜底：无法计算时用不透明白
+            return Microsoft.UI.ColorHelper.FromArgb(255, 255, 255, 255);
+        }
+    }
+
     /// <summary>按主题设置窗口背景与标题栏装饰：default=无毛玻璃（兼容老设备）；mica=毛玻璃。</summary>
     private void ApplyWindowTheme(string theme)
     {
@@ -344,10 +503,21 @@ public sealed partial class MainWindow : Window
         {
             var tb = this.AppWindow.TitleBar;
             tb.ExtendsContentIntoTitleBar = true;
-            tb.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            tb.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            tb.ButtonHoverBackgroundColor = Microsoft.UI.ColorHelper.FromArgb(40, 255, 255, 255);
-            tb.ButtonPressedBackgroundColor = Microsoft.UI.ColorHelper.FromArgb(60, 255, 255, 255);
+            // 系统窗口按钮（最小化/最大化/关闭）用不透明背景，配合 XAML 右上角的不透明背景条，
+            // 避免在 Mica/透明背景下看不清、易误触。
+            Windows.UI.Color btnColor = Microsoft.UI.Colors.Transparent;
+            try
+            {
+                if (Application.Current.Resources.TryGetValue("SolidBackgroundFillColorBase", out var v) && v is Windows.UI.Color c)
+                    btnColor = c;
+            }
+            catch { }
+            tb.ButtonBackgroundColor = btnColor;
+            tb.ButtonInactiveBackgroundColor = btnColor;
+            // 悬停/按下用【不透明】的混合色，避免半透明白把按钮背景整体替换成透明导致看不清。
+            // 计算方式：在实色底 btnColor 上叠加白色（40/255 与 60/255），结果仍是不透明的实色。
+            tb.ButtonHoverBackgroundColor = BlendWithWhite(btnColor, 40);
+            tb.ButtonPressedBackgroundColor = BlendWithWhite(btnColor, 60);
             SystemBackdrop = theme == "mica" ? new MicaBackdrop() : null;
         }
         catch
@@ -404,45 +574,77 @@ public sealed partial class MainWindow : Window
         return clone;
     }
 
+    /// <summary>滤镜设置是否全部为默认/中性值（用于判断旧数据是否真的改过）。</summary>
+    private static bool IsDefaultSettings(FilterSettings s)
+    {
+        return s.Hue == 0 && s.HslSaturation == 100 && s.Lightness == 0 &&
+               s.Saturation == 100 && s.Contrast == 100 && s.Brightness == 0 &&
+               s.Temperature == 0 && s.Highlights == 0 && s.Shadows == 0;
+    }
+
     private void ApplyCurrent()
     {
         // 实际是否应用滤镜：
-        //  - 总开关（EnableSwitch）关闭 → 必关
+        //  - 全局总开关（EnableSwitch）关闭 → 必关
         //  - 按应用模式开启且列表非空 → 需前台命中某绑定（_activeBinding != null），否则自动关闭
         bool perAppRequiresHit = _data.PerAppEnabled && _data.AppBindings.Count > 0;
-        bool shouldApply = EnableSwitch.IsOn && (!perAppRequiresHit || _activeBinding != null);
+        bool globalOn = EnableSwitch.IsOn && (!perAppRequiresHit || _activeBinding != null);
         AppLog.Write("Apply",
-            $"shouldApply={shouldApply} IsEnabled={EnableSwitch.IsOn} PerAppEnabled={_data.PerAppEnabled} Bindings={_data.AppBindings.Count} active={( _activeBinding != null)}");
+            $"globalOn={globalOn} IsEnabled={EnableSwitch.IsOn} PerAppEnabled={_data.PerAppEnabled} Bindings={_data.AppBindings.Count} active={( _activeBinding != null)}");
 
-        if (shouldApply)
+        // 按应用命中绑定的配置（命中时所有启用的显示器都用它）
+        Profile? perAppProfile = null;
+        if (perAppRequiresHit && _activeBinding != null && _activeBinding.ProfileIndex >= 0 &&
+            _activeBinding.ProfileIndex < _profiles.Count)
         {
-            FilterSettings settings;
-            // 命中绑定且绑定了配置 → 自动应用该配置的滤镜设置
-            if (perAppRequiresHit && _activeBinding != null && _activeBinding.ProfileIndex >= 0 &&
-                _activeBinding.ProfileIndex < _profiles.Count)
-            {
-                settings = _profiles[_activeBinding.ProfileIndex].Settings;
-            }
-            // 关闭 DXGI（放大镜引擎）时 HSL 不可用 → 应用时忽略 HSL，避免近似模拟出分色效果
-            else
-            {
-                settings = _data.UseDxgi ? _data.Current : NeutralizeHsl(_data.Current);
-            }
-
-            if (!FilterEngine.Apply(settings))
-            {
-                StatusText.Text = "应用滤镜失败：" + FilterEngine.LastError;
-                UpdateEngineStatus(); // 可能已回退到其它引擎
-            }
-            else
-            {
-                // 滤镜覆盖层创建后，确保 UI 重新置顶在滤镜层之上
-                TryEnsureUiTopmost();
-            }
+            perAppProfile = _profiles[_activeBinding.ProfileIndex];
+            SyncAppliedProfileSwitch(perAppProfile);
         }
-        else
+        else if (perAppRequiresHit && _activeBinding == null)
         {
-            FilterEngine.Reset();
+            SyncAppliedProfileSwitch(null);
+        }
+
+        // 逐显示器应用：每块启用的显示器独立生效（各自的开关 + 配置）
+        bool anyOk = false;
+        for (int i = 0; i < _monitors.Count; i++)
+        {
+            var display = _monitors[i];
+            var dstate = EnsureDisplay(i);
+            bool displayOn = globalOn && dstate.IsEnabled;
+            if (!displayOn)
+            {
+                // 该显示器不应用 → 若之前建过覆盖层则移除
+                FilterEngine.ResetDisplay(i);
+                continue;
+            }
+
+            // 该显示器的生效设置：命中绑定配置优先，否则用工作副本 Current。
+            // 注意：始终用 dstate.Current（激活配置时它已被克隆为该配置的设置，滑块编辑的也是它），
+            // 不能用 _profiles[idx].Settings —— 否则滑块改动与生效值脱节（基础调节失效）。
+            FilterSettings settings;
+            if (perAppProfile != null)
+            {
+                settings = perAppProfile.Settings;
+            }
+            else
+            {
+                settings = _data.UseDxgi ? dstate.Current : NeutralizeHsl(dstate.Current);
+            }
+
+            if (FilterEngine.Apply(i, display, settings)) anyOk = true;
+            else StatusText.Text = "应用滤镜失败：" + FilterEngine.LastError;
+        }
+
+        if (anyOk)
+        {
+            UpdateEngineStatus();
+            TryEnsureUiTopmost();
+        }
+        else if (globalOn)
+        {
+            // 没有任何显示器启用 → 视为关闭状态
+            UpdateEngineStatus();
         }
     }
 
@@ -526,13 +728,34 @@ public sealed partial class MainWindow : Window
     private void ApplyDxgiMode(bool useDxgi)
     {
         _data.UseDxgi = useDxgi;
+        if (ActiveProfile is { } ap) ap.UseDxgi = useDxgi; // 记忆到当前激活配置
+        ApplyDxgiModeNoDialog(useDxgi);
+        ApplyCurrent();
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>静默设置 DXGI 引擎模式（不弹确认框、不应用滤镜），供切换显示器/配置时恢复用。</summary>
+    private void ApplyDxgiModeNoDialog(bool useDxgi)
+    {
         FilterEngine.UseDxgi = useDxgi;
         FilterEngine.Initialize();
         UpdateEngineStatus();
         RefreshHslEnabled();
-        ApplyCurrent();
-        _saveTimer.Stop();
-        _saveTimer.Start();
+    }
+
+    /// <summary>切换配置时恢复该配置记忆的 DXGI 开关（静默设置，不弹确认框）。</summary>
+    private void ApplyProfileDxgi(Profile profile)
+    {
+        bool useDxgi = profile.UseDxgi;
+        _data.UseDxgi = useDxgi;
+        _dxgiInit = true;
+        DxgiSwitch.IsOn = useDxgi;
+        _dxgiInit = false;
+        FilterEngine.UseDxgi = useDxgi;
+        FilterEngine.Initialize();
+        UpdateEngineStatus();
+        RefreshHslEnabled();
     }
 
     // ---------------- 按应用切换滤镜（进程列表 + 配置绑定） ----------------
@@ -775,9 +998,14 @@ public sealed partial class MainWindow : Window
 
     private void SaveState()
     {
-        _data.Current = _data.Current.Clone();
+        // 每显示器状态：把当前界面显示/编辑的状态写回当前显示器的状态，并同步全局（主显示器）
+        CurrentDisplay.Current = CurrentDisplay.Current.Clone();
+        CurrentDisplay.ActiveProfileIndex = ActiveProfile is { } ap ? _profiles.IndexOf(ap) : -1;
+        CurrentDisplay.IsEnabled = DisplayEnableSwitch?.IsOn ?? CurrentDisplay.IsEnabled;
+        // 全局总开关 + 主显示器兼容字段（保留给旧版/其它显示器选择逻辑）
         _data.IsEnabled = EnableSwitch.IsOn;
-        _data.ActiveProfileIndex = ActiveProfile is { } ap ? _profiles.IndexOf(ap) : -1;
+        _data.ActiveProfileIndex = _data.Displays.Count > 0 ? _data.Displays[0].ActiveProfileIndex : -1;
+        _data.Current = _data.Displays.Count > 0 ? _data.Displays[0].Current.Clone() : new FilterSettings();
         _data.Profiles = new List<Profile>(_profiles);
         _data.SelectedProfileIndex = ProfileList.SelectedIndex;
         _data.PerAppEnabled = PerAppSwitch?.IsOn ?? _data.PerAppEnabled;
@@ -827,7 +1055,7 @@ public sealed partial class MainWindow : Window
     {
         slider.ValueChangedExternal += (_, v) =>
         {
-            SetHslValue(_data.Current, channelName, field, v);
+            SetHslValue(CurrentDisplay.Current, channelName, field, v);
             ScheduleApply();
             _saveTimer.Stop();
             _saveTimer.Start();
@@ -926,7 +1154,7 @@ public sealed partial class MainWindow : Window
     /// <summary>把所有 HSL 恢复为默认值（中性，不产生任何效果）。</summary>
     private void HslReset_Click(object sender, RoutedEventArgs e)
     {
-        var s = _data.Current;
+        var s = CurrentDisplay.Current;
         s.Hue = 0;
         s.HslSaturation = 100;
         s.Lightness = 0;
@@ -946,6 +1174,15 @@ public sealed partial class MainWindow : Window
 
     private void EnableSwitch_Toggled(object sender, RoutedEventArgs e)
     {
+        // 打开全局总开关时：若所有显示器都未启用，则默认启用所有显示器（避免“打开了却没效果”的困惑）
+        if (EnableSwitch.IsOn && _data.Displays.Count > 0 && _data.Displays.All(d => !d.IsEnabled))
+        {
+            _displayInit = true;
+            foreach (var d in _data.Displays)
+                d.IsEnabled = true;
+            DisplayEnableSwitch.IsOn = CurrentDisplay.IsEnabled;
+            _displayInit = false;
+        }
         ApplyCurrent();
         _saveTimer.Stop();
         _saveTimer.Start();
@@ -965,8 +1202,8 @@ public sealed partial class MainWindow : Window
     private void ApplyPreset(FilterSettings preset)
     {
         MarkFilterChanged();
-        _data.Current = preset.Clone();
-        LoadSettingsIntoUi(_data.Current);
+        CurrentDisplay.Current = preset.Clone();
+        LoadSettingsIntoUi(CurrentDisplay.Current);
         ApplyCurrent();
         _saveTimer.Stop();
         _saveTimer.Start();
@@ -979,7 +1216,7 @@ public sealed partial class MainWindow : Window
         var name = await PromptNameAsync("新建配置", "配置名称", $"配置 {_profiles.Count + 1}");
         if (string.IsNullOrEmpty(name)) return;
 
-        var profile = new Profile { Name = name, Settings = _data.Current.Clone() };
+        var profile = new Profile { Name = name, Settings = CurrentDisplay.Current.Clone(), UseDxgi = _data.UseDxgi };
         _profiles.Add(profile);
         ProfileList.SelectedItem = profile;
         SaveState();
@@ -1008,14 +1245,19 @@ public sealed partial class MainWindow : Window
             _profileToggleInit = true;
             foreach (var x in _profiles) x.IsActive = false;
             _profileToggleInit = false;
-            _data.ActiveProfileIndex = -1;
-            _data.Current = new FilterSettings();
-            LoadSettingsIntoUi(_data.Current);
+            // 所有显示器都清除对该配置的激活引用
+            foreach (var d in _data.Displays)
+                d.ActiveProfileIndex = -1;
+            CurrentDisplay.Current = new FilterSettings();
+            LoadSettingsIntoUi(CurrentDisplay.Current);
             ApplyCurrent();
         }
-        else if (_data.ActiveProfileIndex > removedIndex)
+        else
         {
-            _data.ActiveProfileIndex--;
+            foreach (var d in _data.Displays)
+            {
+                if (d.ActiveProfileIndex > removedIndex) d.ActiveProfileIndex--;
+            }
         }
         RefreshBindingList();
         SaveState();
@@ -1069,7 +1311,7 @@ public sealed partial class MainWindow : Window
             var settings = JsonSerializer.Deserialize<FilterSettings>(json, _profileJson);
             if (settings == null) throw new Exception("文件内容为空或格式不正确");
             var name = Path.GetFileNameWithoutExtension(file.Name);
-            var profile = new Profile { Name = name, Settings = settings };
+            var profile = new Profile { Name = name, Settings = settings, UseDxgi = _data.UseDxgi };
             _profiles.Add(profile);
             ProfileList.SelectedItem = profile;
             RefreshBindingList();
@@ -1170,7 +1412,9 @@ public sealed partial class MainWindow : Window
 
         // 修正激活配置索引（按对象）
         var activeProfile = _profiles.FirstOrDefault(p => p.IsActive);
-        _data.ActiveProfileIndex = activeProfile == null ? -1 : _profiles.IndexOf(activeProfile);
+        int newActive = activeProfile == null ? -1 : _profiles.IndexOf(activeProfile);
+        foreach (var d in _data.Displays)
+            d.ActiveProfileIndex = newActive;
 
         RefreshBindingList();
         SaveState();
@@ -1195,7 +1439,8 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>激活某配置：n 选 1（其它配置开关自动关闭），并应用其滤镜设置。
-    /// 无论通过列表开关、快捷键还是外部调用，都统一走这里，保证开关显示与当前生效配置同步。</summary>
+    /// 无论通过列表开关、快捷键还是外部调用，都统一走这里，保证开关显示与当前生效配置同步。
+    /// 只作用于当前选中的显示器（每显示器独立激活配置）。</summary>
     private void SetActiveProfileAndApply(Profile profile)
     {
         _profileToggleInit = true;
@@ -1203,17 +1448,32 @@ public sealed partial class MainWindow : Window
             p.IsActive = ReferenceEquals(p, profile);
         _profileToggleInit = false;
 
-        _data.ActiveProfileIndex = _profiles.IndexOf(profile);
-        _data.Current = profile.Settings.Clone();
-        _savedSnapshot = _data.Current.Clone();
+        CurrentDisplay.ActiveProfileIndex = _profiles.IndexOf(profile);
+        CurrentDisplay.Current = profile.Settings.Clone();
+        _savedSnapshot = CurrentDisplay.Current.Clone();
         _pendingEdit = false;
         HideSaveBar();
-        LoadSettingsIntoUi(_data.Current);
+        LoadSettingsIntoUi(CurrentDisplay.Current);
+        ApplyProfileDxgi(profile); // 恢复该配置记忆的 DXGI 开关
         ApplyCurrent();
         SaveState();
     }
 
     private void ActivateProfile(Profile profile) => SetActiveProfileAndApply(profile);
+
+    /// <summary>把配置列表的“应用开关”同步显示为指定配置（n 选 1），并同步激活索引。
+    /// 用于按应用自动切换滤镜等非手动场景，只更新开关显示与索引，不改动 UI 滑块、不触发 Toggled 回环。</summary>
+    private void SyncAppliedProfileSwitch(Profile? profile)
+    {
+        _profileToggleInit = true;
+        foreach (var p in _profiles)
+            p.IsActive = ReferenceEquals(p, profile);
+        _profileToggleInit = false;
+        // 按应用命中的配置对所有启用的显示器生效 → 同步所有显示器的激活索引
+        int idx = profile == null ? -1 : _profiles.IndexOf(profile);
+        foreach (var d in _data.Displays)
+            d.ActiveProfileIndex = idx;
+    }
 
     /// <summary>关闭当前激活配置 → 无激活配置，改动进入临时配置（下次启动恢复默认）。</summary>
     private void DeactivateProfile()
@@ -1223,12 +1483,12 @@ public sealed partial class MainWindow : Window
             p.IsActive = false;
         _profileToggleInit = false;
 
-        _data.ActiveProfileIndex = -1;
-        _data.Current = new FilterSettings();
-        _savedSnapshot = _data.Current.Clone();
+        CurrentDisplay.ActiveProfileIndex = -1;
+        CurrentDisplay.Current = new FilterSettings();
+        _savedSnapshot = CurrentDisplay.Current.Clone();
         _pendingEdit = false;
         HideSaveBar();
-        LoadSettingsIntoUi(_data.Current);
+        LoadSettingsIntoUi(CurrentDisplay.Current);
         ApplyCurrent();
         SaveState();
     }
@@ -1337,8 +1597,8 @@ public sealed partial class MainWindow : Window
     private void SaveBarSave_Click()
     {
         if (ActiveProfile is { } ap)
-            ap.Settings = _data.Current.Clone();
-        _savedSnapshot = _data.Current.Clone();
+            ap.Settings = CurrentDisplay.Current.Clone();
+        _savedSnapshot = CurrentDisplay.Current.Clone();
         _pendingEdit = false;
         HideSaveBar();
         SaveState();
@@ -1347,8 +1607,8 @@ public sealed partial class MainWindow : Window
     /// <summary>点击“取消”：回滚到最近一次已提交的配置，不保存。</summary>
     private void SaveBarCancel_Click()
     {
-        _data.Current = _savedSnapshot.Clone();
-        LoadSettingsIntoUi(_data.Current);
+        CurrentDisplay.Current = _savedSnapshot.Clone();
+        LoadSettingsIntoUi(CurrentDisplay.Current);
         ApplyCurrent();
         _pendingEdit = false;
         HideSaveBar();

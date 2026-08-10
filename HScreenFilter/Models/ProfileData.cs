@@ -21,6 +21,9 @@ public class ProfileData
     /// <summary>是否启用 DXGI 捕获引擎（开启时 HSL 调色可用，关闭时用放大镜 API）。</summary>
     public bool UseDxgi { get; set; }
 
+    /// <summary>每显示器独立状态（开关 + 激活配置 + 临时设置）。键由显示器索引关联；索引与枚举顺序对应。</summary>
+    public System.Collections.Generic.List<DisplayState> Displays { get; set; } = new();
+
     /// <summary>界面主题：default（无毛玻璃，兼容老设备）/ mica（毛玻璃）。默认 default。</summary>
     public string Theme { get; set; } = "default";
 

@@ -72,6 +72,31 @@ public sealed partial class FilterSlider : UserControl
         set => SetValue(SpectrumProperty, value);
     }
 
+    /// <summary>
+    /// 数值显示基准：非 NaN 时数值框显示“相对该基准的差值”（如基准 100，值 120 → 显示 +20，值 85 → -15，值 100 → 0）。
+    /// 用于 HSL 饱和度相对默认 100 显示。默认 NaN = 直接显示原始值。
+    /// </summary>
+    public static readonly DependencyProperty DisplayBaseProperty =
+        DependencyProperty.Register(nameof(DisplayBase), typeof(double), typeof(FilterSlider), new PropertyMetadata(double.NaN));
+
+    public double DisplayBase
+    {
+        get => (double)GetValue(DisplayBaseProperty);
+        set => SetValue(DisplayBaseProperty, value);
+    }
+
+    private string FormatValue(double value)
+    {
+        double rounded = Math.Round(value);
+        if (double.IsNaN(DisplayBase))
+            return rounded.ToString(CultureInfo.InvariantCulture);
+
+        double rel = Math.Round(value - DisplayBase);
+        return rel > 0
+            ? "+" + rel.ToString(CultureInfo.InvariantCulture)
+            : rel.ToString(CultureInfo.InvariantCulture);
+    }
+
     private static void OnValuePropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         var c = (FilterSlider)d;
@@ -112,7 +137,7 @@ public sealed partial class FilterSlider : UserControl
     {
         if (ValueText == null) return;
         if (ValueText.FocusState == FocusState.Unfocused)
-            ValueText.Text = Math.Round(Value).ToString();
+            ValueText.Text = FormatValue(Value);
     }
 
     // 直接在数值框输入并回车：把输入提交为合法数值，并关闭输入框（移走焦点、光标消失）。
@@ -129,7 +154,7 @@ public sealed partial class FilterSlider : UserControl
         else if (e.Key == Windows.System.VirtualKey.Escape)
         {
             // 取消修改：恢复为当前生效值
-            ValueText.Text = Math.Round(Value).ToString();
+            ValueText.Text = FormatValue(Value);
             CloseInputBox();
             e.Handled = true;
         }
@@ -147,14 +172,30 @@ public sealed partial class FilterSlider : UserControl
     private void CommitValueText()
     {
         if (ValueText == null) return;
-        if (double.TryParse(ValueText.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed))
+        double parsed;
+        if (double.IsNaN(DisplayBase))
         {
-            parsed = Math.Clamp(parsed, Minimum, Maximum);
-            if (_internal) return; // 防止回环
-            Value = parsed;
-            ValueChangedExternal?.Invoke(this, parsed);
-            Slider.Value = parsed;
+            if (!double.TryParse(ValueText.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+            {
+                RefreshValueText();
+                return;
+            }
         }
+        else
+        {
+            // 相对基准显示：输入的是相对值（如 +20 / -15），换算回绝对值再保存。
+            if (!double.TryParse(ValueText.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double rel))
+            {
+                RefreshValueText();
+                return;
+            }
+            parsed = rel + DisplayBase;
+        }
+        parsed = Math.Clamp(parsed, Minimum, Maximum);
+        if (_internal) return; // 防止回环
+        Value = parsed;
+        ValueChangedExternal?.Invoke(this, parsed);
+        Slider.Value = parsed;
         RefreshValueText();
     }
 

@@ -1,11 +1,13 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using HScreenFilter.Models;
 
 namespace HScreenFilter.Services;
 
 /// <summary>
-/// 逐像素 HSL 着色器滤镜引擎（DXGI 模式）。
+/// 逐像素 HSL 着色器滤镜引擎（DXGI 模式），支持多显示器：每块显示器一个覆盖层实例。
 ///
 /// 底层委托给 <see cref="VorticeHslEngine"/>：原始 Win32 覆盖层窗口 + D3D11 交换链 +
 /// 逐像素 HSL 像素着色器 + DXGI Desktop Duplication 捕获（GPU 内 CopyResource），
@@ -19,8 +21,10 @@ public static class ShaderFilterEngine
     private static bool _checked;
     private static bool _available;
     private static string _lastError = "";
-    private static VorticeHslEngine? _engine;
-    private static bool _running;
+
+    /// <summary>每个显示器一个引擎实例（key = 显示器索引）。</summary>
+    private static readonly Dictionary<int, VorticeHslEngine> _engines = new();
+
     private static bool _capturable; // 覆盖层是否可被 OBS 等捕获（WDA_MONITOR）；重建引擎后要重新应用
 
     public static bool IsAvailable
@@ -63,67 +67,101 @@ public static class ShaderFilterEngine
     }
 
     /// <summary>
-    /// 应用（或更新）滤镜。需要 UI 线程调用。
-    /// 首次调用时启动 VorticeHslEngine；之后只更新着色器参数。
+    /// 应用（或更新）某块显示器的滤镜。需要 UI 线程调用。
+    /// 首次调用时启动该显示器的 VorticeHslEngine；之后只更新着色器参数。
     /// </summary>
-    public static bool Apply(FilterSettings s)
+    public static bool Apply(int displayIndex, DisplayMonitor display, FilterSettings s)
     {
         lock (_lock)
         {
             if (!Initialize()) return false;
             try
             {
-                var engine = _engine;
-                // 渲染线程意外退出（桌面分辨率变化/捕获丢失/异常）时自动重建，避免画面永久冻结
-                if (!_running || engine == null || !engine.IsRendering)
-                {
-                    AppLog.Write("ShaderEngine",
-                        $"重建引擎 (running={_running}, engine={(engine != null)}, isRendering={(engine?.IsRendering ?? false)})");
-                    engine?.Dispose();
-                    _engine = null;
-                    engine = new VorticeHslEngine();
-                    if (!engine.Start(GetDesktopWidth(), GetDesktopHeight()))
-                    {
-                        _lastError = "DXGI 引擎启动失败：" + (engine.LastError ?? "未知错误");
-                        AppLog.Write("ShaderEngine", "启动失败: " + _lastError);
-                        engine.Dispose();
-                        _engine = null;
-                        return false;
-                    }
-                    // 重建后重新应用“可被捕获”状态：否则新引擎默认为 WDA_EXCLUDEFROMCAPTURE，
-                    // 会导致 OBS（WGC/DXGI）都抓不到滤镜效果（UI 是 WDA_NONE 仍可见 → “只抓到 UI 抓不到滤镜”）。
-                    try { engine.Capturable = _capturable; } catch { }
-                    _engine = engine;
-                    _running = true;
-                }
+                var engine = GetOrCreateEngine(displayIndex, display);
+                if (engine == null) return false;
                 engine.Apply(s);
-                return _running;
+                return true;
             }
             catch (Exception ex)
             {
                 _lastError = "着色器引擎启动失败：" + ex.Message;
                 AppLog.Write("ShaderEngine", "Apply 异常: " + ex);
-                try { StopInternal(); } catch { }
+                try { RemoveEngine(displayIndex); } catch { }
                 return false;
             }
         }
     }
 
-    /// <summary>停止覆盖层与捕获（重置为未启用状态）。</summary>
+    /// <summary>停止全部覆盖层与捕获（重置为未启用状态）。</summary>
     public static void Stop()
     {
-        lock (_lock) StopInternal();
+        lock (_lock)
+        {
+            foreach (var e in _engines.Values.ToList())
+            {
+                try { e.Dispose(); } catch { }
+            }
+            _engines.Clear();
+        }
     }
 
-    /// <summary>设置覆盖层是否可被屏幕捕获（OBS 等）；转发给 VorticeHslEngine（若已启动，切换 WDA_MONITOR/EXCLUDEFROMCAPTURE）。
-    /// 记录该状态，引擎重建后会自动重新应用，避免覆盖层意外退回 WDA_EXCLUDEFROMCAPTURE。</summary>
+    /// <summary>停止指定显示器的覆盖层（该显示器不应用滤镜时调用）。</summary>
+    public static void StopDisplay(int displayIndex)
+    {
+        lock (_lock)
+        {
+            if (_engines.TryGetValue(displayIndex, out var e))
+            {
+                try { e.Dispose(); } catch { }
+                _engines.Remove(displayIndex);
+            }
+        }
+    }
+
+    /// <summary>获取（必要时创建）指定显示器的引擎实例。失败返回 null。</summary>
+    private static VorticeHslEngine? GetOrCreateEngine(int displayIndex, DisplayMonitor display)
+    {
+        if (_engines.TryGetValue(displayIndex, out var engine) && engine != null && engine.IsRendering)
+            return engine;
+
+        AppLog.Write("ShaderEngine",
+            $"{(engine != null ? "重建" : "新建")} 显示器 {displayIndex} 引擎 ({display.Width}x{display.Height} @{display.X},{display.Y}, output={displayIndex})");
+        if (engine != null) { try { engine.Dispose(); } catch { } }
+        _engines.Remove(displayIndex);
+
+        engine = new VorticeHslEngine();
+        if (!engine.Start(display.X, display.Y, display.Width, display.Height, displayIndex))
+        {
+            _lastError = "DXGI 引擎启动失败：" + (engine.LastError ?? "未知错误");
+            AppLog.Write("ShaderEngine", "启动失败: " + _lastError);
+            try { engine.Dispose(); } catch { }
+            _engines.Remove(displayIndex);
+            return null;
+        }
+        // 重建后重新应用“可被捕获”状态
+        try { engine.Capturable = _capturable; } catch { }
+        _engines[displayIndex] = engine;
+        return engine;
+    }
+
+    /// <summary>设置覆盖层是否可被屏幕捕获（OBS 等）；转发给所有 VorticeHslEngine。
+    /// 记录该状态，引擎重建后会自动重新应用。</summary>
     public static void SetOverlayCapturable(bool capturable)
     {
         lock (_lock)
         {
             _capturable = capturable;
-            try { if (_engine != null) _engine.Capturable = capturable; } catch { }
+            foreach (var e in _engines.Values)
+            {
+                try { e.Capturable = capturable; } catch { }
+            }
         }
+    }
+
+    /// <summary>是否已有引擎正在渲染（任一显示器）。</summary>
+    public static bool IsAnyRendering()
+    {
+        lock (_lock) return _engines.Values.Any(e => e.IsRendering);
     }
 
     public static void Shutdown() => Stop();
@@ -147,34 +185,12 @@ public static class ShaderFilterEngine
 
     // ---------------- 内部实现 ----------------
 
-    private static int GetDesktopWidth()
+    private static void RemoveEngine(int displayIndex)
     {
-        var monitor = OverlayNative.MonitorFromPoint(new OverlayNative.POINT(), OverlayNative.MONITOR_DEFAULTTOPRIMARY);
-        var mi = new OverlayNative.MONITORINFO { cbSize = Marshal.SizeOf<OverlayNative.MONITORINFO>() };
-        if (OverlayNative.GetMonitorInfo(monitor, ref mi))
+        if (_engines.TryGetValue(displayIndex, out var e))
         {
-            int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
-            if (w > 0) return w;
+            try { e.Dispose(); } catch { }
+            _engines.Remove(displayIndex);
         }
-        return 1920;
-    }
-
-    private static int GetDesktopHeight()
-    {
-        var monitor = OverlayNative.MonitorFromPoint(new OverlayNative.POINT(), OverlayNative.MONITOR_DEFAULTTOPRIMARY);
-        var mi = new OverlayNative.MONITORINFO { cbSize = Marshal.SizeOf<OverlayNative.MONITORINFO>() };
-        if (OverlayNative.GetMonitorInfo(monitor, ref mi))
-        {
-            int h = mi.rcMonitor.Bottom - mi.rcMonitor.Top;
-            if (h > 0) return h;
-        }
-        return 1080;
-    }
-
-    private static void StopInternal()
-    {
-        _running = false;
-        try { _engine?.Dispose(); } catch { }
-        _engine = null;
     }
 }
