@@ -30,8 +30,13 @@ public sealed class HotkeyService : IDisposable
         if (_comboIds.ContainsKey((modifiers, key))) return false;
 
         id = _nextId++;
+        int regId = id; // 复制到局部变量，避免在 lambda 中捕获 out 参数（CS1628）
         uint fsMods = (uint)modifiers | MOD_NOREPEAT;
-        if (NativeMethods.RegisterHotKey(_window.Handle, id, fsMods, (uint)key))
+        bool ok = false;
+        // RegisterHotKey 必须在“拥有窗口的消息线程”上调用，否则返回 ERROR_INVALID_WINDOW_HANDLE(1408)。
+        _window.InvokeOnMessageThread(() =>
+            ok = NativeMethods.RegisterHotKey(_window.Handle, regId, fsMods, (uint)key));
+        if (ok)
         {
             _callbacks[id] = callback;
             _comboIds[(modifiers, key)] = id;
@@ -43,7 +48,7 @@ public sealed class HotkeyService : IDisposable
     public bool Unregister(int id)
     {
         if (_window.Handle == IntPtr.Zero || id == 0 || !_callbacks.TryGetValue(id, out _)) return false;
-        NativeMethods.UnregisterHotKey(_window.Handle, id);
+        _window.InvokeOnMessageThread(() => NativeMethods.UnregisterHotKey(_window.Handle, id));
         _callbacks.Remove(id);
         foreach (var kv in _comboIds)
         {
@@ -72,7 +77,7 @@ public sealed class HotkeyService : IDisposable
         if (_window.Handle != IntPtr.Zero)
         {
             foreach (var id in _callbacks.Keys)
-                NativeMethods.UnregisterHotKey(_window.Handle, id);
+                _window.InvokeOnMessageThread(() => NativeMethods.UnregisterHotKey(_window.Handle, id));
         }
         _callbacks.Clear();
         _comboIds.Clear();

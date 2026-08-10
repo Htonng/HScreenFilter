@@ -1,4 +1,4 @@
-# Upload HScreenFilter assets and create a GitHub Release
+﻿# Upload HScreenFilter assets and create a GitHub Release
 # Usage: .\upload.ps1
 # Uses your existing git credential (GCM) to authenticate with GitHub - no token hardcoded.
 # Requires the repository 'origin' remote to be set, and assets built by package.ps1.

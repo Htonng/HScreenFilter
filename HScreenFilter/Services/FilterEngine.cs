@@ -197,14 +197,19 @@ public static class FilterEngine
         return false;
     }
 
-    public static bool Apply(FilterSettings s)
+    /// <summary>
+    /// 对指定显示器应用滤镜。需要 UI 线程调用。
+    /// DXGI（PixelShader）时每显示器一个覆盖层；放大镜/伽马引擎是整屏全局的（无法按显示器独立，
+    /// 此时无论哪块显示器都用同一份设置，属于底层物理限制）。
+    /// </summary>
+    public static bool Apply(int displayIndex, DisplayMonitor display, FilterSettings s)
     {
         if (!Initialize()) return false;
         lock (_lock)
         {
             if (_kind == FilterEngineKind.PixelShader)
             {
-                if (ShaderFilterEngine.Apply(s)) return true;
+                if (ShaderFilterEngine.Apply(displayIndex, display, s)) return true;
 
                 // 覆盖层/捕获建立失败 → 回退到颜色矩阵/伽马引擎
                 LastError = "逐像素着色器引擎不可用，已回退：" + ShaderFilterEngine.LastError;
@@ -240,6 +245,16 @@ public static class FilterEngine
             if (_kind == FilterEngineKind.GammaRamp)
                 return GammaRampEngine.Reset();
             return true;
+        }
+    }
+
+    /// <summary>关闭指定显示器的覆盖层（该显示器不应用滤镜时调用）。DXGI 引擎才支持逐显示器；其余引擎整屏全局忽略。</summary>
+    public static void ResetDisplay(int displayIndex)
+    {
+        lock (_lock)
+        {
+            if (_kind == FilterEngineKind.PixelShader)
+                ShaderFilterEngine.StopDisplay(displayIndex);
         }
     }
 

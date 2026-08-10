@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
 
 namespace HScreenFilter.Models;
@@ -55,6 +56,30 @@ public class Profile : INotifyPropertyChanged
         get => _isActive;
         set => SetProperty(ref _isActive, value);
     }
+
+    private bool _useDxgi = true;
+
+    /// <summary>该配置使用的滤镜引擎：true=DXGI 逐像素着色器（HSL 调色可用），false=放大镜 API（HSL 不可用）。
+    /// 每个配置记忆自己的 DXGI 开关，切换配置时恢复。</summary>
+    public bool UseDxgi
+    {
+        get => _useDxgi;
+        set
+        {
+            if (SetProperty(ref _useDxgi, value))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ApiText)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ApiVisibility)));
+            }
+        }
+    }
+
+    /// <summary>该配置使用的 API 徽标文字（DXGI / 放大镜），显示在配置列表快捷键左侧。</summary>
+    [JsonIgnore]
+    public string ApiText => UseDxgi ? "DXGI" : "放大镜";
+
+    [JsonIgnore]
+    public Visibility ApiVisibility => Visibility.Visible;
 
     /// <summary>是否显示快捷键徽标（未绑定快捷键时隐藏）。</summary>
     public Visibility HotkeyVisibility => HotkeyKey != 0 ? Visibility.Visible : Visibility.Collapsed;

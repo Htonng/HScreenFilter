@@ -35,8 +35,11 @@ internal sealed class VorticeHslEngine : IDisposable
     private static OverlayNative.WNDPROC? _staticWndProc;
 
     private IntPtr _hwnd;
+    private int _x;         // 覆盖层窗口在虚拟桌面的 X（左上角）
+    private int _y;         // 覆盖层窗口在虚拟桌面的 Y（左上角）
     private int _width;
     private int _height;
+    private int _outputIndex; // 该显示器在 DXGI 适配器中的输出索引（用于捕获）
 
     // D3D11 对象
     private ID3D11Device _device = null!;
@@ -92,10 +95,13 @@ internal sealed class VorticeHslEngine : IDisposable
     }
 
     /// <summary>启动：创建覆盖层窗口、交换链、着色器、捕获。失败返回 false 并记录 <see cref="LastError"/>。</summary>
-    public bool Start(int width, int height)
+    public bool Start(int x, int y, int width, int height, int outputIndex)
     {
+        _x = x;
+        _y = y;
         _width = width;
         _height = height;
+        _outputIndex = outputIndex;
         try
         {
             _device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport, null!);
@@ -122,6 +128,10 @@ internal sealed class VorticeHslEngine : IDisposable
         }
     }
 
+    /// <summary>调色强度系数：0.5 = 所有 HSL 调色强度减半（只减半“相对中性值”的偏差，
+    /// 不改动用户保存的参数，UI/配置文件里的值保持原样）。</summary>
+    private const double AdjustStrength = 0.75;
+
     /// <summary>用滤镜参数更新着色器常量（线程安全：只写入参数缓冲，渲染线程每帧读取）。</summary>
     public void Apply(FilterSettings s)
     {
@@ -129,10 +139,10 @@ internal sealed class VorticeHslEngine : IDisposable
         lock (_paramsLock)
         {
             // 与 HLSL cbuffer 字段顺序保持一致
-            p[0] = (float)s.Hue;                                  // MasterHue
-            p[1] = (float)(s.HslSaturation / 100.0);              // MasterSat
-            p[2] = (float)(s.Lightness / 100.0);                  // MasterLight
-            p[3] = (float)(s.Saturation / 100.0);                 // GlobalSat
+            p[0] = (float)(s.Hue * AdjustStrength);                                    // MasterHue
+            p[1] = (float)(1.0 + (s.HslSaturation / 100.0 - 1.0) * AdjustStrength);    // MasterSat
+            p[2] = (float)(s.Lightness / 100.0 * AdjustStrength);                      // MasterLight
+            p[3] = (float)(1.0 + (s.Saturation / 100.0 - 1.0) * AdjustStrength);       // GlobalSat
             p[4] = (float)(s.Temperature / 100.0);                // Temperature
             p[5] = (float)(s.Contrast / 100.0);                   // Contrast
             p[6] = (float)(s.Brightness / 100.0 * 0.5);           // Brightness
@@ -144,9 +154,9 @@ internal sealed class VorticeHslEngine : IDisposable
             foreach (var name in HslChannelNames.ColorNames)
             {
                 var ch = channels?.Find(c => c != null && c.Name == name);
-                p[idx++] = ch == null ? 0f : (float)ch.Hue;                    // Hue
-                p[idx++] = ch == null ? 1f : (float)(ch.Saturation / 100.0);   // Sat
-                p[idx++] = ch == null ? 0f : (float)(ch.Lightness / 100.0);    // Light
+                p[idx++] = ch == null ? 0f : (float)(ch.Hue * AdjustStrength);                          // Hue
+                p[idx++] = ch == null ? 1f : (float)(1.0 + (ch.Saturation / 100.0 - 1.0) * AdjustStrength); // Sat
+                p[idx++] = ch == null ? 0f : (float)(ch.Lightness / 100.0 * AdjustStrength);            // Light
             }
             // 滤镜参数填到 0..32；33..36 光标参数由渲染线程每帧更新，37..39 padding（数组初始为 0）
             for (; idx < 33; idx++) p[idx] = 0f;
@@ -197,7 +207,7 @@ internal sealed class VorticeHslEngine : IDisposable
 
         // 窗口标题供 OBS「窗口捕获」识别（覆盖层全屏 = 整屏滤镜效果）
         _hwnd = OverlayNative.CreateWindowExW(exStyle, WindowClassName, "HScreenFilter 滤镜层",
-            style, 0, 0, _width, _height, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
+            style, _x, _y, _width, _height, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
         if (_hwnd == IntPtr.Zero)
             throw new InvalidOperationException("CreateWindowExW 失败");
 
@@ -338,7 +348,11 @@ internal sealed class VorticeHslEngine : IDisposable
     {
         using var dxgiDevice = _device.QueryInterface<IDXGIDevice>();
         var adapter = dxgiDevice.GetAdapter();
-        adapter.EnumOutputs(0, out var output);
+        // 捕获该显示器对应的输出（多显示器时每块显示器一个覆盖层，各自捕获自己的输出）
+        IDXGIOutput? output = null;
+        var enResult = adapter.EnumOutputs((uint)_outputIndex, out output);
+        if (enResult.Failure || output == null)
+            throw new InvalidOperationException($"EnumOutputs({_outputIndex}) 失败 (0x{enResult.Code:X8})");
         using var output1 = output.QueryInterface<IDXGIOutput1>();
         _duplication = output1.DuplicateOutput(_device);
     }
@@ -482,6 +496,10 @@ internal sealed class VorticeHslEngine : IDisposable
 
     /// <summary>从 back buffer 0 拷贝到 staging 并读回中心像素（B8G8R8A8）。</summary>
     private (byte R, byte G, byte B, byte A) ReadBackCenter()
+        => ReadBackPixel(_width / 2, _height / 2);
+
+    /// <summary>从 back buffer 0 拷贝到 staging 并读回指定像素（B8G8R8A8）。</summary>
+    private (byte R, byte G, byte B, byte A) ReadBackPixel(int px, int py)
     {
         using var back = _swapChain.GetBuffer<ID3D11Texture2D>(0);
         var desc = back.Description;
@@ -501,9 +519,7 @@ internal sealed class VorticeHslEngine : IDisposable
         _context.CopyResource(staging, back);
         _context.Flush();
         var mapped = _context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-        int cx = _width / 2;
-        int cy = _height / 2;
-        int off = cy * (int)mapped.RowPitch + cx * 4; // B8G8R8A8：B,G,R,A
+        int off = py * (int)mapped.RowPitch + px * 4; // B8G8R8A8：B,G,R,A
         byte b = Marshal.ReadByte(mapped.DataPointer, off);
         byte g = Marshal.ReadByte(mapped.DataPointer, off + 1);
         byte r = Marshal.ReadByte(mapped.DataPointer, off + 2);
@@ -520,9 +536,9 @@ internal sealed class VorticeHslEngine : IDisposable
         var pt = new OverlayNative.POINT();
         if (OverlayNative.GetCursorPos(ref pt))
         {
-            // 覆盖窗口铺满主显示器且位于 (0,0)，屏幕物理像素 = 窗口/帧像素
-            _params[33] = pt.X;
-            _params[34] = pt.Y;
+            // 覆盖窗口铺满所在显示器且位于 (x,y)，光标排除用相对该显示器的像素坐标
+            _params[33] = pt.X - _x;
+            _params[34] = pt.Y - _y;
             _params[35] = CursorHalfSize;
             _params[36] = CursorHalfSize;
         }
@@ -607,11 +623,67 @@ internal sealed class VorticeHslEngine : IDisposable
             return rgb + m;
         }
 
+        // —— OKLab/OKLCH（Björn Ottosson 2020 官方参考实现，含健壮性处理）——
+        // 算法与官方一致：sRGB 线性化 → LMS → 立方根 → OKLab → 极坐标(OKLCH)。
+        // 健壮性（上一版全白的根因修复）：
+        //  1) 消色像素（C≈0）不调 atan2(0,0)——HLSL 中 atan2(0,0) 未定义，部分 GPU 返回 NaN，
+        //     而灰色像素在 OKLab 恰为 a=0,b=0（白底/UI/阴影到处都是）→ NaN 传播 → 全白。
+        //  2) pow 底数用 max(x, 1e-8)，避免 pow(0, 小数) 在部分 GPU 产生 NaN。
+        float3 SrgbToLinear(float3 c)
+        {
+            float3 lo = c / 12.92;
+            float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+            return lerp(lo, hi, step(0.04045, c));
+        }
+
+        float3 LinearToSrgb(float3 c)
+        {
+            float3 lo = c * 12.92;
+            float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
+            return lerp(lo, hi, step(0.0031308, c));
+        }
+
+        void RgbToOklch(float3 c, out float L, out float C, out float H)
+        {
+            float3 lin = SrgbToLinear(c);
+            float l = 0.4122214708 * lin.r + 0.5363325363 * lin.g + 0.0514459929 * lin.b;
+            float m = 0.2119034982 * lin.r + 0.6806995451 * lin.g + 0.1073969566 * lin.b;
+            float s = 0.0883024619 * lin.r + 0.2817188376 * lin.g + 0.6299787005 * lin.b;
+            l = pow(max(l, 1e-8), 1.0 / 3.0);
+            m = pow(max(m, 1e-8), 1.0 / 3.0);
+            s = pow(max(s, 1e-8), 1.0 / 3.0);
+            float La = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+            float a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+            float b = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+            L = La;
+            C = sqrt(a * a + b * b);
+            // 消色像素避免 atan2(0,0)（HLSL 未定义）
+            H = C < 1e-5 ? 0.0 : wrapHue(atan2(b, a) * 57.2957795);
+        }
+
+        float3 OklchToRgb(float L, float C, float H)
+        {
+            float hr = H * 0.0174532925; // π/180
+            float a = C * cos(hr);
+            float b = C * sin(hr);
+            float l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+            float m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+            float s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+            l_ = l_ * l_ * l_;
+            m_ = m_ * m_ * m_;
+            s_ = s_ * s_ * s_;
+            float r =  4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_;
+            float g = -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_;
+            float b2 = -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_;
+            return LinearToSrgb(float3(r, g, b2));
+        }
+
+        // 色系软掩码：以参考色相为中心，半宽 60°，平滑衰减到 0（试验阶段所有掩码统一 60°）。
         float hueMask(float h, float refHue)
         {
             float a = abs(h - refHue);
             a = min(a, 360.0 - a);
-            float t = a / 40.0;
+            float t = a / 60.0;
             float w = saturate(1.0 - t);
             return w * w * (3.0 - 2.0 * w);
         }
@@ -621,29 +693,40 @@ internal sealed class VorticeHslEngine : IDisposable
             return (abs(h) > 0.01 || abs(sat - 1.0) > 0.001 || abs(light) > 0.001) ? 1.0 : 0.0;
         }
 
+        // 明度掩码：试验阶段与色相/饱和度同为 60°（可随时改回 30° 收紧亮暗过渡）。
+        float hueMaskNarrow(float h, float refHue)
+        {
+            float a = abs(h - refHue);
+            a = min(a, 360.0 - a);
+            float t = a / 60.0;
+            float w = saturate(1.0 - t);
+            return w * w * (3.0 - 2.0 * w);
+        }
+
+        // 该色系是否有明度调整（亮度掩码只看明度，避免被色相/饱和度调整连带放大）
+        float isActiveLight(float light)
+        {
+            return abs(light) > 0.001 ? 1.0 : 0.0;
+        }
+
+        // 抖动噪声：按屏幕像素坐标的确定性伪随机（0..1），同一像素每帧一致，不会闪烁/蠕变。
+        float DitherNoise(float2 p)
+        {
+            return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+        }
+
         float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
         {
             float4 color = InputTexture.Sample(InputSampler, uv);
 
-            // 光标排除：DXGI 捕获若含软件指针，此区域原样输出，避免滤镜给鼠标指针着色/残影
-            if (CursorHalfW > 0.0)
-            {
-                uint tw, th;
-                InputTexture.GetDimensions(tw, th);
-                float2 px = uv * float2((float)tw, (float)th);
-                if (abs(px.x - CursorX) <= CursorHalfW && abs(px.y - CursorY) <= CursorHalfH)
-                    return float4(color.rgb, 1.0);
-            }
-
+            // 光标排除已移除：光标与画面一起被滤镜正常处理（不再做剔除，避免方框/光晕影响体验）
             float3 c = color.rgb;
 
             float h, s, l;
             rgbToHsl(c, h, s, l);
 
+            // 主色系（全部）色相：先旋转再用于掩码选择（所见即所选）
             h = wrapHue(h + MasterHue);
-            s = saturate(s * MasterSat);
-            l = saturate(l + MasterLight);
-            s = saturate(s * GlobalSat);
 
             float wR = hueMask(h, 0.0)   * isActive(HueR, SatR, LightR);
             float wO = hueMask(h, 30.0)  * isActive(HueO, SatO, LightO);
@@ -654,18 +737,56 @@ internal sealed class VorticeHslEngine : IDisposable
             float wP = hueMask(h, 270.0) * isActive(HueP, SatP, LightP);
             float wM = hueMask(h, 300.0) * isActive(HueM, SatM, LightM);
 
+            // 明度用更窄的掩码（30°）：亮暗调整集中在色系中心，过渡区不放大原画面亮度差异
+            float lR = hueMaskNarrow(h, 0.0)   * isActiveLight(LightR);
+            float lO = hueMaskNarrow(h, 30.0)  * isActiveLight(LightO);
+            float lY = hueMaskNarrow(h, 60.0)  * isActiveLight(LightY);
+            float lG = hueMaskNarrow(h, 120.0) * isActiveLight(LightG);
+            float lC = hueMaskNarrow(h, 180.0) * isActiveLight(LightC);
+            float lB = hueMaskNarrow(h, 240.0) * isActiveLight(LightB);
+            float lP = hueMaskNarrow(h, 270.0) * isActiveLight(LightP);
+            float lM = hueMaskNarrow(h, 300.0) * isActiveLight(LightM);
+
             float wSum = wR + wO + wY + wG + wC + wB + wP + wM;
-            if (wSum > 1e-5)
+            float lSum = lR + lO + lY + lG + lC + lB + lP + lM;
+            float hShift = 0.0;
+            float sMul = 1.0;
+            float lShift = 0.0;
+            if (wSum > 1e-5 || lSum > 1e-5)
             {
-                float hShift = (wR*HueR + wO*HueO + wY*HueY + wG*HueG + wC*HueC + wB*HueB + wP*HueP + wM*HueM) / wSum;
-                float sMul = 1.0 + (wR*(SatR-1.0) + wO*(SatO-1.0) + wY*(SatY-1.0) + wG*(SatG-1.0) + wC*(SatC-1.0) + wB*(SatB-1.0) + wP*(SatP-1.0) + wM*(SatM-1.0)) / wSum;
-                float lShift = (wR*LightR + wO*LightO + wY*LightY + wG*LightG + wC*LightC + wB*LightB + wP*LightP + wM*LightM) / wSum;
-                h = wrapHue(h + hShift);
-                s = saturate(s * sMul);
-                l = saturate(l + lShift);
+                // 关键：除以 max(wSum,1) 而不是 wSum。原来除 wSum 会把单个色系的调整归一成“满强度”，
+                // 效果从色系中心到掩码边界都是全量，只有到边界才骤降 → 出现棱角分明的色块。
+                // 现在单个色系时效果随掩码权重平滑淡出（中心满、越靠近边界越弱）；
+                // 只有多个色系重叠（wSum>1）才归一，避免叠加过冲。
+                float norm = max(wSum, 1.0);
+                float normL = max(lSum, 1.0);
+                hShift = (wR*HueR + wO*HueO + wY*HueY + wG*HueG + wC*HueC + wB*HueB + wP*HueP + wM*HueM) / norm;
+                sMul = 1.0 + (wR*(SatR-1.0) + wO*(SatO-1.0) + wY*(SatY-1.0) + wG*(SatG-1.0) + wC*(SatC-1.0) + wB*(SatB-1.0) + wP*(SatP-1.0) + wM*(SatM-1.0)) / norm;
+                lShift = (lR*LightR + lO*LightO + lY*LightY + lG*LightG + lC*LightC + lB*LightB + lP*LightP + lM*LightM) / normL;
             }
 
-            float3 rgb = hslToRgb(h, s, l);
+            // OKLCH 中间调色：在感知均匀空间（OKLab/OKLCH，Ottosson 官方参考）施加
+            // 主调整 + 分色系调整。感知均匀的亮度/色相可减缓渐变过渡的色带；
+            // 暗部特殊处理同样基于感知亮度 L。
+            float L2, C2, H2;
+            RgbToOklch(c, L2, C2, H2);
+
+            // 明度：主色系 + 分色系；暗部特殊处理 3：L 最小钳制 0.01，避免纯黑奇点
+            L2 = saturate(L2 + MasterLight + lShift);
+            L2 = max(L2, 0.01);
+
+            // 暗部特殊处理 1+2：L < 0.15 时，彩度增量与色相调整权重按 smoothstep 衰减，
+            // 防止暗部过饱和 / 色相偏移造成色阶断裂
+            float darkDecay = smoothstep(0.0, 0.15, L2);
+
+            // 色相：wrapHue 保证在 0..360 环上取最短路径；暗部降低色相调整权重
+            H2 = wrapHue(H2 + hShift * darkDecay);
+
+            // 彩度：主 × 全局 × 分色系，各自“相对 1.0 的增量”按 darkDecay 衰减
+            float satTotal = MasterSat * GlobalSat * sMul;
+            C2 = C2 * (1.0 + (satTotal - 1.0) * darkDecay);
+
+            float3 rgb = OklchToRgb(L2, C2, H2);
 
             rgb.r *= 1.0 + 0.18 * Temperature;
             rgb.g *= 1.0 + 0.04 * Temperature;
@@ -676,6 +797,14 @@ internal sealed class VorticeHslEngine : IDisposable
             rgb = rgb * (1.0 - Shadows) + Shadows;
 
             rgb = saturate(rgb);
+            // 抖动：±1.2/255（1.2 LSB）的确定性噪声，打散 8-bit 量化在平滑渐变/掩码过渡区产生的色带
+            // （banding），让过渡更自然；幅度很小，肉眼几乎不可见。
+            float2 sp = pos.xy;
+            float3 dither = float3(
+                DitherNoise(sp),
+                DitherNoise(sp + float2(7.1, 3.3)),
+                DitherNoise(sp + float2(11.7, 5.9))) * (2.4 / 255.0) - (1.2 / 255.0);
+            rgb = saturate(rgb + dither);
             return float4(rgb, 1.0);
         }
         """;
