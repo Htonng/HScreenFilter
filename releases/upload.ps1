@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = 'Htonng/HScreenFilter'
-$ver = '1.2.5'
+$ver = '1.2.6'
 $releaseTag = "v$ver"
 
 # --- Get token from git credential manager (never printed) ---
@@ -22,7 +22,7 @@ $authHeaders = @{ 'User-Agent' = 'HScreenFilter'; 'Authorization' = "Bearer $tok
 $releaseBody = @{
     tag_name = $releaseTag
     name     = "HScreenFilter $releaseTag"
-    body     = "## HScreenFilter $releaseTag`n`nWinUI 3 screen-filter tool.`n`n### ✨ 新功能`n- 配置与快捷键交互改版：配置应用开关（n 选 1）+ 底部「是否保存」保存条`n- 托盘菜单显示配置列表并在当前生效配置前打勾`n- 配置导入 / 导出、重命名、列表拖拽排序`n- 全局开关快捷键入口移至头部，提示 10 秒自动消失`n- 主题复选框不再随滚轮误切换`n`n### 🔧 修复`n- 修复覆盖层重建后可被捕获状态丢失（WGC 录不到滤镜）`n- 修复可捕获时 DXGI 截屏看不到 UI`n- 修复 HSL 分色系调色失效（恢复不透明渲染）`n`n### Download`n- **Installer**: HScreenFilter-$releaseTag-setup.exe`n- **Portable**: HScreenFilter-$releaseTag-portable.zip"
+    body     = "## HScreenFilter $releaseTag`n`nWinUI 3 screen-filter tool.`n`n### ✨ 新功能`n- 多显示器独立滤镜：每台显示器独立开关 + 独立激活配置（n 选 1 随显示器）+ 独立临时设置`n- 每配置记忆 DXGI 引擎开关（切换配置时自动恢复）`n- 显示器列表下拉框（主显示器置前），逐显示器管理滤镜`n- 打开全局总开关时若所有显示器均未启用则默认全部启用`n`n### Download`n- **Installer**: HScreenFilter-$releaseTag-setup.exe`n- **Portable**: HScreenFilter-$releaseTag-portable.zip"
     draft    = $false
     prerelease = $false
 } | ConvertTo-Json
