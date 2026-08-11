@@ -102,6 +102,8 @@ public sealed class MessageWindow : IDisposable
             IsBackground = true,
             Name = "HScreenFilterMsgWindow",
         };
+        // 提高消息线程优先级，确保 WM_HOTKEY 等消息在前台全屏/游戏进程时仍能及时被调度
+        w._thread.Priority = ThreadPriority.AboveNormal;
         w._thread.SetApartmentState(ApartmentState.STA); // 托盘/COM 需要 STA
         w._thread.Start();
 
@@ -117,6 +119,10 @@ public sealed class MessageWindow : IDisposable
     {
         try
         {
+            // 尽量把当前线程的 Win32 优先级提到最高，增加在游戏/全屏场景下收到 WM_HOTKEY 的概率。
+            // 这里使用 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)。
+            try { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST); } catch { }
+
             lock (_lock)
             {
                 _threadId = GetCurrentThreadId();
@@ -298,6 +304,13 @@ public sealed class MessageWindow : IDisposable
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    // 提高消息线程的 Win32 级别优先级（在 ThreadMain 中调用 SetThreadPriority(GetCurrentThread(), ...)）。
+    private const int THREAD_PRIORITY_HIGHEST = 2; // Win32 THREAD_PRIORITY_HIGHEST
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentThread();
+    [DllImport("kernel32.dll")]
+    private static extern bool SetThreadPriority(IntPtr hThread, int nPriority);
 
     private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr value)
         => IntPtr.Size == 8 ? SetWindowLongPtr64(hWnd, nIndex, value) : new IntPtr(SetWindowLong32(hWnd, nIndex, value));

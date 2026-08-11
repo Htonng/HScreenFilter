@@ -229,22 +229,28 @@ public static class FilterEngine
 
     public static bool Reset()
     {
-        if (!Initialize()) return false;
         lock (_lock)
         {
-            if (_kind == FilterEngineKind.PixelShader)
+            bool ok = true;
+            // DXGI 覆盖层是本应用自建窗口：无论当前引擎是什么都停止（幂等）。
+            // 注意不能因 Initialize() 失败提前返回 —— 否则回退引擎下关闭滤镜会残留。
+            try { ShaderFilterEngine.Stop(); } catch { ok = false; }
+            // 放大镜全屏颜色矩阵：仅当本应用初始化过才复位（否则可能清掉其它应用的效果）。
+            if (_magInitialized)
             {
-                ShaderFilterEngine.Stop();
-                return true;
+                try
+                {
+                    var m = MAGCOLOREFFECT.Identity();
+                    ok = MagSetFullscreenColorEffect(ref m) && ok;
+                }
+                catch { ok = false; }
             }
-            if (_kind == FilterEngineKind.FullScreenColorEffect)
-            {
-                var m = MAGCOLOREFFECT.Identity();
-                return MagSetFullscreenColorEffect(ref m);
-            }
+            // 伽马曲线：仅当本应用在使用伽马引擎时才复位为线性。
             if (_kind == FilterEngineKind.GammaRamp)
-                return GammaRampEngine.Reset();
-            return true;
+            {
+                try { ok = GammaRampEngine.Reset() && ok; } catch { ok = false; }
+            }
+            return ok;
         }
     }
 
