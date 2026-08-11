@@ -395,6 +395,11 @@
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                Text="开启后可被 OBS 等屏幕捕获（滤镜效果由于底层限制，目前没有被OBS捕获的解决方法）"/>
                     <ToggleSwitch x:Name="AutoStartSwitch" Header="开机自动启动" Toggled="AutoStartSwitch_Toggled"/>
+                    <ToggleSwitch x:Name="AutoTraySwitch" Header="自启后自动进入托盘"
+                                  OnContent="直接进入托盘" OffContent="启动时显示窗口" Toggled="AutoTraySwitch_Toggled"/>
+                    <TextBlock FontSize="11" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="开启后，开机自启时不弹出主窗口，直接最小化到系统托盘（仅对自启生效，手动启动仍正常显示窗口）。"/>
                 </StackPanel>
             </Border>
         </Grid>

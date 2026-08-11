@@ -17,7 +17,8 @@ public static class AutoStart
         {
             var exe = Environment.ProcessPath;
             if (!string.IsNullOrEmpty(exe))
-                key.SetValue(ValueName, $"\"{exe}\"");
+                // 带 --autostart 参数，便于启动时区分“开机自启”与手动启动（用于“自启后自动进入托盘”）。
+                key.SetValue(ValueName, $"\"{exe}\" --autostart");
         }
         else
         {

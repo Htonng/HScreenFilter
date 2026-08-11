@@ -287,7 +287,14 @@ public sealed partial class MainWindow : Window
         if (_data.SelectedProfileIndex >= 0 && _data.SelectedProfileIndex < _profiles.Count)
             ProfileList.SelectedIndex = _data.SelectedProfileIndex;
 
-        AutoStartSwitch.IsOn = _data.AutoStart;
+        // 开机自启开关：以注册表实际状态为准（它才是事实来源），再同步到 _data 与界面。
+        // 自启后自动进入托盘开关：自启启动时是否直接最小化到托盘。
+        bool autoStartOn = AutoStart.IsEnabled();
+        _data.AutoStart = autoStartOn;
+        AutoStartSwitch.IsOn = autoStartOn;
+        _uiInit = true;
+        AutoTraySwitch.IsOn = _data.MinimizeToTray;
+        _uiInit = false;
         // 全局总开关（EnableSwitch）与每显示器独立开关（DisplayEnableSwitch）
         _displayInit = true;
         DisplayEnableSwitch.IsOn = CurrentDisplay.IsEnabled;
@@ -332,11 +339,17 @@ public sealed partial class MainWindow : Window
         };
         _tray.Show();
 
+        // 自启且勾选“自启后自动进入托盘”→ 启动后直接隐藏到托盘（不弹主窗口）。
+        // 在 Activated 里执行隐藏，确保窗口创建完成后再隐藏。
+        _startToTray = AutoStartLaunched() && _data.MinimizeToTray;
+
         Closed += MainWindow_Closed;
         Activated += MainWindow_Activated;
     }
 
     private bool _sizeApplied;
+    private bool _startToTray;      // 本次为开机自启且勾选“自启后自动进入托盘”
+    private bool _trayHideDone;     // 已执行自启→托盘隐藏（只隐藏一次）
     private ForegroundAppWatcher _foregroundWatcher = null!;
     private AppBinding? _activeBinding;   // 按应用模式下，当前命中的绑定（null=未命中）
     private bool _perAppInit;             // 避免恢复状态时触发 UI 事件
@@ -346,6 +359,15 @@ public sealed partial class MainWindow : Window
     // 宽度约 460（默认观感），高度 860（保证开机自启区默认可见）。
     private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
     {
+        // 自启启动且勾选“自启后自动进入托盘”→ 首次激活后立即隐藏到托盘，不显示主窗口。
+        if (_startToTray && !_trayHideDone)
+        {
+            _trayHideDone = true;
+            try { this.AppWindow.Hide(); } catch { }
+            try { _tray?.ShowBalloon("屏幕滤镜已在后台运行", "已自动最小化到系统托盘。"); } catch { }
+            return;
+        }
+
         if (_sizeApplied) return;
         _sizeApplied = true;
 
@@ -607,6 +629,7 @@ public sealed partial class MainWindow : Window
 
         // 逐显示器应用：每块启用的显示器独立生效（各自的开关 + 配置）
         bool anyOk = false;
+        bool anyEnabled = false;
         for (int i = 0; i < _monitors.Count; i++)
         {
             var display = _monitors[i];
@@ -618,6 +641,7 @@ public sealed partial class MainWindow : Window
                 FilterEngine.ResetDisplay(i);
                 continue;
             }
+            anyEnabled = true;
 
             // 该显示器的生效设置：命中绑定配置优先，否则用工作副本 Current。
             // 注意：始终用 dstate.Current（激活配置时它已被克隆为该配置的设置，滑块编辑的也是它），
@@ -636,14 +660,23 @@ public sealed partial class MainWindow : Window
             else StatusText.Text = "应用滤镜失败：" + FilterEngine.LastError;
         }
 
-        if (anyOk)
+        if (!anyEnabled)
+        {
+            // 没有任何显示器启用 → 彻底关闭滤镜。必须整体 Reset（而非仅 ResetDisplay）：
+            // 在回退到放大镜/伽马引擎的机器上（DXGI 不可用），仅 ResetDisplay 不会复位这些
+            // 全局引擎，导致关闭总开关/按应用（游戏）检测关闭后滤镜仍然残留。
+            AppLog.Write("Apply", "无显示器启用 → 彻底关闭滤镜引擎 (FilterEngine.Reset)");
+            FilterEngine.Reset();
+            UpdateEngineStatus();
+        }
+        else if (anyOk)
         {
             UpdateEngineStatus();
             TryEnsureUiTopmost();
         }
         else if (globalOn)
         {
-            // 没有任何显示器启用 → 视为关闭状态
+            // 有显示器启用但应用失败 → 仅刷新引擎状态（错误信息已在上面的 StatusText 中）
             UpdateEngineStatus();
         }
     }
@@ -1011,6 +1044,8 @@ public sealed partial class MainWindow : Window
         _data.PerAppEnabled = PerAppSwitch?.IsOn ?? _data.PerAppEnabled;
         _data.Captureable = CaptureSwitch?.IsOn ?? _data.Captureable;
         _data.UseDxgi = DxgiSwitch?.IsOn ?? _data.UseDxgi;
+        _data.AutoStart = AutoStartSwitch?.IsOn ?? _data.AutoStart;
+        _data.MinimizeToTray = AutoTraySwitch?.IsOn ?? _data.MinimizeToTray;
         _store.Save(_data);
     }
 
@@ -1188,10 +1223,30 @@ public sealed partial class MainWindow : Window
         _saveTimer.Start();
     }
 
+    /// <summary>本次进程是否为“开机自启”启动（命令行带 --autostart）。</summary>
+    private static bool AutoStartLaunched()
+    {
+        var args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length; i++)
+            if (string.Equals(args[i], "--autostart", StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
     private void AutoStartSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         _data.AutoStart = AutoStartSwitch.IsOn;
         AutoStart.Set(_data.AutoStart);
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    private void AutoTraySwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_uiInit) return;
+        _data.MinimizeToTray = AutoTraySwitch.IsOn;
+        _saveTimer.Stop();
+        _saveTimer.Start();
     }
 
     private void PresetStandard_Click(object sender, RoutedEventArgs e) => ApplyPreset(new FilterSettings());
@@ -1736,6 +1791,19 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
+    /// <summary>配置快捷键：按一次=应用该配置（开），再按一次=关闭该配置（回到默认/临时设置）。
+    /// 判定“已开启”以当前显示器上该配置是否处于激活状态为准。</summary>
+    private void ToggleProfileHotkey(Profile profile)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (ReferenceEquals(ActiveProfile, profile))
+                DeactivateProfile();
+            else
+                SetActiveProfileAndApply(profile);
+        });
+    }
+
     private void RegisterProfileHotkey(Profile profile)
     {
         if (_profileHotkeyIds.TryGetValue(profile, out var oldId))
@@ -1744,7 +1812,7 @@ public sealed partial class MainWindow : Window
             _profileHotkeyIds.Remove(profile);
         }
         if (!profile.HasHotkey) return;
-        if (_hotkeys.Register(profile.HotkeyModifiers, profile.HotkeyKey, () => ApplyProfile(profile), out var id))
+        if (_hotkeys.Register(profile.HotkeyModifiers, profile.HotkeyKey, () => ToggleProfileHotkey(profile), out var id))
             _profileHotkeyIds[profile] = id;
     }
 
