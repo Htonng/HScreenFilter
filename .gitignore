@@ -1,0 +1,13 @@
+# 构建产物（不纳入版本库）
+build/
+dist/
+tools/
+
+# DSH 开发辅助目录
+.dsh-vision-toolkit/
+
+# 日志
+*.log
+
+# IDE
+.vs/

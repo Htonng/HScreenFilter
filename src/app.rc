@@ -1,0 +1,41 @@
+// app.rc — 应用资源：图标 + 清单 + 版本信息
+#include <windows.h>
+
+// 图标资源（APPICON 用于托盘/窗口图标）
+APPICON ICON "assets/icon.ico"
+IDI_ICON1 ICON "assets/icon.ico"
+
+// 内嵌清单：每显示器 V2 DPI 感知（否则高分屏 UI 被系统拉伸变糊）
+1 RT_MANIFEST "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,2,7,0
+ PRODUCTVERSION 1,2,7,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "HScreenFilter"
+            VALUE "FileDescription", "HScreenFilter 屏幕滤镜 (C++ 版)"
+            VALUE "FileVersion", "1.2.7"
+            VALUE "InternalName", "HScreenFilter"
+            VALUE "OriginalFilename", "HScreenFilter.exe"
+            VALUE "ProductName", "HScreenFilter 屏幕滤镜"
+            VALUE "ProductVersion", "1.2.7"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

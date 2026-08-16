@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HScreenFilter · Flat Design 原型</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="dark">
+<div id="app">
+
+  <!-- ═══ v2 顶部：品牌 + 引擎状态 + 调试日志 ═══ -->
+  <header class="app-header">
+    <div class="brand">HScreenFilter</div>
+    <div class="engine-status" id="engineStatus">
+      <span class="dot"></span>滤镜引擎：LUT 逐像素引擎（3D LUT，支持 HSL 调色）
+    </div>
+    <button class="btn" id="btnDebug">调试日志</button>
+  </header>
+
+  <!-- ═══ 工具栏（两行）：显示器/启用/滤镜总开关 + 全局快捷键 ═══ -->
+  <div class="toolbar">
+    <div class="toolbar-row">
+      <label class="toolbar-label">显示器</label>
+      <div class="select-wrap">
+        <select id="displaySelect">
+          <option>显示器 1（1920 × 1080）</option>
+          <option>显示器 2（2560 × 1440）</option>
+        </select>
+      </div>
+      <label class="check-inline" id="displayEnableRow">
+        <input type="checkbox" id="displayEnable" checked>
+        <span class="checkmark"></span>
+        <span class="check-text" id="displayEnableText">启用（已开）</span>
+      </label>
+      <label class="toggle-inline">
+        <input type="checkbox" id="masterEnable" checked>
+        <span class="track"><span class="knob"></span></span>
+        <span class="toggle-label">启用滤镜</span>
+      </label>
+    </div>
+    <div class="toolbar-row">
+      <button class="btn" id="btnGlobalHotkey">全局开关快捷键…</button>
+      <span class="hotkey-badge" id="globalHotkeyBadge">Ctrl + Shift + F</span>
+      <span class="toolbar-spacer"></span>
+      <span class="hint-inline">按快捷键可在任意窗口切换滤镜总开关</span>
+    </div>
+  </div>
+
+  <!-- ═══ 主区域：左导航 + 右内容 ═══ -->
+  <div class="main">
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-page="base"><span class="nav-ico ico-sliders"></span>基础调节</button>
+      <button class="nav-item" data-page="hsl"><span class="nav-ico ico-palette"></span>HSL 调色盘</button>
+      <button class="nav-item" data-page="perapp"><span class="nav-ico ico-apps"></span>按应用切换</button>
+      <button class="nav-item" data-page="profiles"><span class="nav-ico ico-config"></span>配置与快捷键</button>
+      <div class="nav-foot">Flat Design<br><span class="nav-foot-sub">WebView2 原型</span></div>
+    </nav>
+
+    <main class="content">
+
+      <!-- ─────────── 基础调节 ─────────── -->
+      <section class="page active" id="page-base">
+        <div class="page-head">
+          <h1>基础调节</h1>
+          <p>拖动滑块即可实时调整滤镜的亮度、对比度、色彩和阴影表现。</p>
+        </div>
+        <div class="slider-group" id="baseSliders">
+          <div class="slider-row" data-key="brightness">
+            <div class="slider-label"><span>亮度 Brightness</span><input class="num" type="number" value="0"></div>
+            <input type="range" class="flat-range" min="-100" max="100" value="0">
+          </div>
+          <div class="slider-row" data-key="contrast">
+            <div class="slider-label"><span>对比度 Contrast</span><input class="num" type="number" value="100"></div>
+            <input type="range" class="flat-range" min="0" max="200" value="100">
+          </div>
+          <div class="slider-row" data-key="saturation">
+            <div class="slider-label"><span>鲜艳度 Saturation</span><input class="num" type="number" value="100"></div>
+            <input type="range" class="flat-range" min="0" max="200" value="100">
+          </div>
+          <div class="slider-row" data-key="highlights">
+            <div class="slider-label"><span>亮部 Highlights</span><input class="num" type="number" value="0"></div>
+            <input type="range" class="flat-range" min="-100" max="100" value="0">
+          </div>
+          <div class="slider-row" data-key="shadows">
+            <div class="slider-label"><span>暗部 Shadows</span><input class="num" type="number" value="0"></div>
+            <input type="range" class="flat-range" min="-100" max="100" value="0">
+          </div>
+          <div class="slider-row" data-key="temperature">
+            <div class="slider-label"><span>色温（冷 ← → 暖）</span><input class="num" type="number" value="0"></div>
+            <input type="range" class="flat-range" min="-100" max="100" value="0" data-gradient="linear-gradient(to right,#4A90D9,#FFFFFF 50%,#E8862C)">
+          </div>
+        </div>
+        <div class="preset-block">
+          <h2>快捷预设</h2>
+          <div class="preset-btns">
+            <button class="btn preset" data-preset="default">默认值</button>
+            <button class="btn preset" data-preset="eye">护眼</button>
+            <button class="btn preset" data-preset="night">夜间</button>
+            <button class="btn preset" data-preset="vivid">鲜艳</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─────────── HSL 调色盘 ─────────── -->
+      <section class="page" id="page-hsl">
+        <div class="page-head">
+          <h1>HSL 调色盘（3D LUT）</h1>
+          <p>按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。</p>
+        </div>
+        <div class="hsl-options">
+          <label class="toggle-row">
+            <input type="checkbox" id="lutSwitch" checked>
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">LUT 引擎开关 <em>（3D LUT 逐像素引擎，支持 HSL）</em></span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="vsyncSwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">垂直同步 V-Sync <em>（防撕裂）</em></span>
+          </label>
+        </div>
+        <div class="hsl-tabs" id="hslTabs">
+          <button class="tab active" data-field="0">色相</button>
+          <button class="tab" data-field="1">饱和度</button>
+          <button class="tab" data-field="2">明亮度</button>
+        </div>
+        <div class="chip-row" id="channelChips">
+          <button class="chip active" data-channel="0"><i style="--c:#8899AA"></i>全部（主）</button>
+          <button class="chip" data-channel="1"><i style="--c:#FF0000"></i>红</button>
+          <button class="chip" data-channel="2"><i style="--c:#FF8000"></i>橙</button>
+          <button class="chip" data-channel="3"><i style="--c:#FFD400"></i>黄</button>
+          <button class="chip" data-channel="4"><i style="--c:#22C55E"></i>绿</button>
+          <button class="chip" data-channel="5"><i style="--c:#06B6D4"></i>青</button>
+          <button class="chip" data-channel="6"><i style="--c:#3B82F6"></i>蓝</button>
+          <button class="chip" data-channel="7"><i style="--c:#8B5CF6"></i>紫</button>
+          <button class="chip" data-channel="8"><i style="--c:#EC4899"></i>品红</button>
+        </div>
+        <div class="hsl-sliders" id="hslSliders">
+          <!-- JS 渲染 9 个通道 × 当前字段的滑块 -->
+        </div>
+        <div class="hsl-foot">
+          <span class="hsl-hint" id="hslHint">已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰（64³ 3D LUT 逐像素着色器）。</span>
+          <button class="btn" id="hslReset">默认值</button>
+        </div>
+      </section>
+
+      <!-- ─────────── 按应用切换 ─────────── -->
+      <section class="page" id="page-perapp">
+        <div class="page-head">
+          <h1>按应用切换滤镜</h1>
+          <p>让滤镜只在指定应用前台时启用，切到其它窗口时自动关闭。</p>
+        </div>
+        <label class="toggle-row">
+          <input type="checkbox" id="perAppSwitch">
+          <span class="track"><span class="knob"></span></span>
+          <span class="toggle-label">启用按应用切换</span>
+        </label>
+        <div class="card-table" id="bindingList">
+          <div class="table-head"><span class="col-app">检测应用</span><span class="col-cfg">绑定配置</span></div>
+          <div class="table-row"><span class="col-app"><i class="proc-ico"></i>chrome.exe</span><span class="col-cfg"><span class="tag">护眼</span></span></div>
+          <div class="table-row"><span class="col-app"><i class="proc-ico"></i>Code.exe</span><span class="col-cfg"><span class="tag tag-green">夜间</span></span></div>
+          <div class="table-row"><span class="col-app"><i class="proc-ico"></i>Photoshop.exe</span><span class="col-cfg"><span class="tag tag-orange">鲜艳</span></span></div>
+          <div class="table-empty" id="bindingEmpty" hidden>尚未添加要检测的应用</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btnBindingAdd">添加应用…</button>
+          <button class="btn" id="btnBindingPick">用当前前台应用添加</button>
+          <button class="btn" id="btnBindingEdit">编辑所选</button>
+          <button class="btn" id="btnBindingDel">删除所选</button>
+        </div>
+        <div class="status-line" id="perAppStatus">○ 尚未添加要检测的应用（请点击「添加应用…」）</div>
+      </section>
+
+      <!-- ─────────── 配置与快捷键 ─────────── -->
+      <section class="page" id="page-profiles">
+        <div class="page-head">
+          <h1>配置与快捷键</h1>
+          <p>保存多套滤镜配置，快速切换并绑定全局快捷键。</p>
+        </div>
+        <div class="card-table profile-table" id="profileList">
+          <div class="table-head"><span class="col-name">名称</span><span class="col-engine">引擎</span><span class="col-hotkey">快捷键</span><span class="col-check">启用</span></div>
+          <div class="table-row" data-profile="0">
+            <span class="col-name"><i class="radio-dot on"></i>默认配置</span>
+            <span class="col-engine"><span class="tag tag-blue">LUT</span></span>
+            <span class="col-hotkey"><span class="hotkey-key">—</span></span>
+            <span class="col-check"><button class="btn btn-enable active" data-profile="0">已启用</button></span>
+          </div>
+          <div class="table-row" data-profile="1">
+            <span class="col-name"><i class="radio-dot"></i>护眼</span>
+            <span class="col-engine"><span class="tag">放大镜</span></span>
+            <span class="col-hotkey"><span class="hotkey-key">Ctrl + Alt + 1</span></span>
+            <span class="col-check"><button class="btn btn-enable" data-profile="1">启用</button></span>
+          </div>
+          <div class="table-row" data-profile="2">
+            <span class="col-name"><i class="radio-dot"></i>夜间</span>
+            <span class="col-engine"><span class="tag tag-blue">LUT</span></span>
+            <span class="col-hotkey"><span class="hotkey-key">Ctrl + Alt + 2</span></span>
+            <span class="col-check"><button class="btn btn-enable" data-profile="2">启用</button></span>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btnProfileNew">新建配置</button>
+          <button class="btn" id="btnProfileRename">重命名</button>
+          <button class="btn" id="btnProfileDel">删除配置</button>
+          <button class="btn" id="btnProfileUp">上移</button>
+          <button class="btn" id="btnProfileDown">下移</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btnProfileImport">导入配置</button>
+          <button class="btn" id="btnProfileExport">导出所选配置</button>
+        </div>
+        <div class="hotkey-block">
+          <span class="block-label">所选配置快捷键</span>
+          <button class="btn" id="btnHotkeySet">设置快捷键…</button>
+          <button class="btn" id="btnHotkeyClear">清除</button>
+          <span class="hotkey-badge">Ctrl + Alt + 1</span>
+        </div>
+        <div class="settings-block">
+          <div class="setting-row">
+            <span class="block-label">界面主题</span>
+            <div class="select-wrap">
+              <select id="themeSelect">
+                <option value="auto" selected>跟随系统</option>
+                <option value="light">浅色（Flat）</option>
+                <option value="dark">深色（Flat）</option>
+              </select>
+            </div>
+          </div>
+          <label class="toggle-row">
+            <input type="checkbox" id="captureSwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">UI 可被 OBS 捕获</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="autoStartSwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">开机自动启动</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="autoTraySwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">自启后自动进入托盘</span>
+          </label>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ═══ 保存条 ═══ -->
+  <div class="savebar" id="saveBar" hidden>
+    <span class="savebar-text">配置发生改变，是否保存？</span>
+    <button class="btn btn-primary" id="btnSaveYes">保存</button>
+    <button class="btn" id="btnSaveNo">取消</button>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
