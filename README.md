@@ -1,70 +1,79 @@
-# HScreenFilter 屏幕滤镜（C++ 版）
+# HScreenFilter 屏幕滤镜 · v2.0.0-alpha
 
-用 **C++17 / Win32 原生控件** 从零重构的屏幕滤镜工具：单 exe、仅依赖系统 DLL。
-**UI 采用「左侧导航 + 右侧内容页」的设置风格**（类系统设置 / Android 设置）——
-全部使用系统标准控件（comctl32 v6 现代主题），由系统负责 DPI、命中与绘制；
-HSL 分色系调色采用 **64³ 3D LUT 管线**，效率较旧版大幅提升。
+**WebView2 桥接版**：C++17 滤镜引擎 + Flat Design 网页 UI（Edge WebView2 承载），
+滑块/开关实时驱动真实的滤镜引擎（3D LUT 逐像素 / 放大镜 / 伽马），数据与旧版完全兼容。
 
-> 本项目是 `C:\~\.Code_old\滤镜.worktrees\add-hsl-color-slider-filter`（C#/WinUI 3 版）
-> 的 C++ 重写。配置数据（`%LocalAppData%\HScreenFilter\profiles.json`）与旧版**完全兼容**。
+> **分支说明**
+> - `main` — 当前版本：C++ 引擎 + WebView2 Flat Design UI（本仓库）
+> - `legacy` — 原 C#/WinUI 3 版（完整历史与 v1.x 标签保留在 legacy 分支）
+> - `dev` — 开发分支
 
----
+## ✨ 功能
 
-## ✨ 功能（与旧版一致）
-
-| 导航页 | 功能 |
+| 页面 | 功能 |
 | --- | --- |
-| **基础调节** | 亮度 / 对比度 / 鲜艳度 / 亮部 / 暗部 + 色温 滑块（数值可直接输入）+ 快捷预设（默认值/护眼/夜间/鲜艳） |
-| **HSL 调色盘** | **红 / 橙 / 黄 / 绿 / 青 / 蓝 / 紫 / 品红** 8 色系 + 全部（主），每色系独立调整色相 / 饱和度 / 明度；选项卡切换三类滑块，滑块下方带 Photoshop 式渐变轨道；LUT 引擎开关 + V-Sync |
-| **按应用切换** | 前台进程命中检测，自动切换绑定配置或自动关闭；添加/编辑/删除检测应用 |
-| **配置与快捷键** | 配置列表（名称 / 引擎 / 快捷键 / 启用勾选）、新建/重命名/删除/导入/导出/上移下移、每配置全局热键、界面主题（默认/Mica）、OBS 捕获、开机自启、自启进托盘 |
+| **基础调节** | 亮度 / 对比度 / 鲜艳度 / 亮部 / 暗部 + 色温 滑块（数值可直接输入）+ 快捷预设（默认值/护眼/夜间/鲜艳，数值与原版一致） |
+| **HSL 调色盘** | **全部（主）+ 红/橙/黄/绿/青/蓝/紫/品红** 9 通道，色相（全部 ±180° / 分色系 ±30°）/ 饱和度（0..200）/ 明亮度（±30）三字段，Photoshop 式渐变轨道 |
+| **按应用切换** | 添加/编辑/删除检测应用、3 秒倒计时拾取前台应用、后台线程 500ms 轮询前台自动切换绑定配置或自动关闭 |
+| **配置与快捷键** | 配置列表（名称/引擎/快捷键/启用，n选1）、新建/重命名/删除/导入/导出/上移/下移、每配置全局热键 + 全局开关快捷键（低级钩子捕获）、开机自启、自启进托盘 |
 
-顶部常驻：显示器选择 + 每显示器启用 + 滤镜总开关 + 全局开关快捷键 + 引擎状态。
+- **顶部常驻**：显示器选择 + 每显示器启用 + 滤镜总开关 + 全局开关快捷键（含清除）
+- **托盘菜单**：启用滤镜（勾选）、全部配置列表切换、显示/退出；最小化/关闭进托盘
+- **主题**：跟随系统 / 浅色 / 深色（Flat），保存提示「配置发生改变，是否保存至\n{配置名}」
+- **窗口**：最小尺寸按系统缩放/工作区自适应（1080p 高缩放下自动缩小），可拉大
+
+## 🖼️ 界面预览
+
+| 浅色 | 深色 |
+| --- | --- |
+| ![浅色](previews/flat_light.png) | ![深色](previews/flat_dark.png) |
+
+| HSL 色相轨道 | HSL 饱和度轨道 | HSL 明亮度轨道 | 配置页 |
+| --- | --- | --- | --- |
+| ![色相](previews/flat_hsl_hue.png) | ![饱和度](previews/flat_hsl_sat.png) | ![明亮度](previews/flat_hsl_light.png) | ![配置](previews/flat_profiles.png) |
 
 ## 🛠️ 技术要点
 
-- **UI（导航式原生控件）**：左侧 ListView 导航 + 右侧内容页即时切换，无整体滚动；
-  全部控件为系统标准控件（comctl32 v6，清单启用现代主题），PerMonitorV2 DPI 由内嵌清单保证，
-  任意缩放比例下由系统正确渲染与命中——彻底规避自绘 UI 的错位/模糊/点击偏差问题。
-- **HSL 效率（3D LUT）**：参数变化时由计算着色器（cs_5_0）对 64³ 格子点并行生成 LUT（亚毫秒级），
-  每帧像素着色器只做一次三线性采样；中性参数直通。算法与旧版逐行一致（HSL 软掩码 → OKLab → 暗部衰减）。
-- **引擎回退链**：LUT 逐像素引擎 → 放大镜颜色矩阵 → 显卡伽马曲线。
+- **引擎**：64³ 3D LUT 管线（cs_5_0 计算着色器并行生成 LUT + 像素着色器三线性采样），
+  HSL 软掩码 → OKLab 感知空间 → 暗部衰减，与旧版逐行一致；
+  引擎回退链：LUT 逐像素 → 放大镜颜色矩阵 → 显卡伽马曲线。
+- **UI**：WebView2 承载 webui2（HTML/CSS/JS，Flat Design），
+  宿主 ↔ 页面通过 `PostWebMessageAsJson` / `postMessage` 双向桥接完整状态；
+  滑块范围/预设/保存语义与原版严格一致。
+- **数据**：`%LocalAppData%\HScreenFilter\profiles.json`，字段与原 C#/C++ 版完全兼容。
 
 ## 🔨 构建
 
-前置：**便携 llvm-mingw 工具链**。设置环境变量 `LLVM_MINGW` 指向工具链根目录，然后：
+前置：**便携 llvm-mingw 工具链**（`LLVM_MINGW` 环境变量）+ WebView2 SDK（`tools/webview2`，构建脚本自动部署）。
 
 ```powershell
-.\build.ps1          # 输出 build\HScreenFilter.exe
+.\build.ps1                  # 主程序（C++ 原生版，输出 build\HScreenFilter.exe）
+.\build-webview2-demo2.ps1   # v2.0.0-alpha WebView2 版（输出 dist\HScreenFilter-v2.0.0-alpha\）
 ```
-
-产物只有一个 `HScreenFilter.exe`（+ 可选 `assets\icon.ico`），动态依赖仅为系统 DLL
-（d3d11 / dxgi / d3dcompiler_47 / shell32 / comctl32 / user32 / gdi32 / dwmapi 等）。
 
 ## 🚀 运行
 
 ```powershell
-.\run.ps1                            # 启动
-.\build\HScreenFilter.exe --selftest # 自检（JSON/着色器/D3D/显示器，不动屏幕）
-.\build\HScreenFilter.exe --enginetest # 引擎链路测试（短暂应用滤镜后恢复）
+.\build\HScreenFilter.exe --selftest   # 主程序自检
+dist\HScreenFilter-v2.0.0-alpha\webview2_demo2.exe   # WebView2 版（需系统已装 WebView2 Runtime）
 ```
 
 ## 📁 源码结构
 
 ```
 src\
-├── common.* / log.* / json.* / models.* / store.*   # 基础与数据（profiles.json 兼容旧版）
-├── autostart.* / monitors.* / msgwindow.* / hotkeys.* / tray.* / fgwatcher.*
+├── common.* / log.* / json.* / models.* / store.*   # 基础与数据（profiles.json 兼容）
+├── autostart.* / monitors.* / msgwindow.* / hotkeys.* / fgwatcher.*
 ├── engines\
-│   ├── hlsl.*                  # LUT 计算着色器 / 采样像素着色器 + D3DCompile 封装
+│   ├── hlsl.*                  # LUT 计算/采样着色器 + D3DCompile 封装
 │   ├── lut_engine.*            # DXGI 覆盖层 + 桌面捕获 + 3D LUT 管线（主引擎）
 │   ├── mag_engine.* / gamma_engine.* / filter_engine.*
-└── ui\
-    ├── main_window.*           # 导航式原生控件布局 + 全部应用逻辑
-    └── dialogs.*               # 模态对话框（新建/编辑/导入导出/确认/倒计时）
+├── ui\main_window.*            # C++ 原生版 UI（legacy 交互参照）
+└── webview2_demo2.cpp          # v2.0.0-alpha WebView2 宿主（桥接引擎与页面）
+webui2\                         # Flat Design UI（index.html / styles.css / app.js）
+previews\                       # 界面效果图
 ```
 
 ## 📜 许可证
 
-GPL-3.0（与旧版一致）。
-
+GPL-3.0。
