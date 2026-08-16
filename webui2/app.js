@@ -72,6 +72,7 @@ if (window.chrome && window.chrome.webview) {
 }
 window.addEventListener('message', ev => { if (ev.data) handleHost(ev.data); });
 window.addEventListener('load', () => {
+  if (window.__hsfInitField !== undefined) state.hslField = window.__hsfInitField;
   buildBaseSliders();
   buildHslTabsAndChips();
   buildHslSliders();
