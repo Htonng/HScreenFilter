@@ -36,6 +36,10 @@ public:
     std::wstring LastError;
     HWND Hwnd() const { return hwnd_; }
 
+    // 立即把 Capturable 应用到覆盖层（WDA 标志改变后 DWM 才按新设置合成；
+    // 仅改标志位不会生效）
+    void ApplyOverlayAffinity();
+
 private:
     void RenderLoop();
     bool RecoverCapture();
@@ -45,8 +49,17 @@ private:
     void CreateOverlayWindow();
     void CreateSwapChain();
     bool CreatePipeline();
+    bool CreateDevice();
+    // 按显示器坐标（而非索引）查找 DXGI 输出：EnumDisplayMonitors 顺序与
+    // EnumOutputs 顺序不一定一致，多显示器时按索引可能捕获到错误的屏幕
+    bool FindOutput(ComPtr<IDXGIAdapter>& adapter, ComPtr<IDXGIOutput>& output);
     void CreateCapture();
-    void ApplyOverlayAffinity();
+    // 取得当前后缓冲对应的 RTV。flip 模型交换链的后缓冲每帧在多个缓冲间轮转，
+    // 单槽缓存会退化为每帧重建 RTV（4060 等卡顿的元凶之一），这里按缓冲身份缓存。
+    ID3D11RenderTargetView* GetBackBufferRtv(ID3D11Texture2D* buffer);
+    // 分辨率变化后重建帧纹理/交换链（防止 CopyResource 失败 → 黑屏/花屏）
+    void EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src);
+    void EnsureSwapChainSize(UINT w, UINT h);
     bool EnsureShaders();
     void ReleaseAll();
 
@@ -59,7 +72,9 @@ private:
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<IDXGISwapChain1> swapChain_;
-    ComPtr<ID3D11RenderTargetView> rtv_;
+    // 后缓冲 RTV 缓存（按缓冲身份缓存；BufferCount=2 时只用前 2 槽）
+    struct BackBufferRtv { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11RenderTargetView> rtv; };
+    BackBufferRtv backBufferRtv_[3];
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> ps_;
     ComPtr<ID3D11ComputeShader> cs_;
@@ -69,13 +84,18 @@ private:
     ComPtr<ID3D11Buffer> paramsBuffer_;
     ComPtr<ID3D11Texture2D> frameTexture_;
     ComPtr<ID3D11ShaderResourceView> frameSrv_;
-    ComPtr<ID3D11Texture2D> backBufferTex_;
+    ComPtr<ID3D11Texture2D> backBufferTex_;   // 当前后缓冲（渲染自检读回用）
     ComPtr<ID3D11Texture3D> lutTexture_;
     ComPtr<ID3D11ShaderResourceView> lutSrv_;
     ComPtr<ID3D11UnorderedAccessView> lutUav_;
     ComPtr<ID3D11SamplerState> inputSampler_;   // 线性
     ComPtr<ID3D11SamplerState> lutSampler_;     // 三线性 + clamp
     ComPtr<IDXGIOutputDuplication> duplication_;
+    ComPtr<IDXGIAdapter> adapter_;
+    ComPtr<IDXGIOutput> output_;
+
+    // 自检只做一次（原来每 30 帧整屏读回 → GPU 停顿 → 卡顿）
+    bool selfChecked_ = false;
 
     // 线程与状态
     std::thread renderThread_;

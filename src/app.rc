@@ -9,8 +9,8 @@ IDI_ICON1 ICON "assets/icon.ico"
 1 RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,2,7,0
- PRODUCTVERSION 1,2,7,0
+ FILEVERSION 2,0,0,0
+ PRODUCTVERSION 2,0,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -26,12 +26,12 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "CompanyName", "HScreenFilter"
-            VALUE "FileDescription", "HScreenFilter 屏幕滤镜 (C++ 版)"
-            VALUE "FileVersion", "1.2.7"
+            VALUE "FileDescription", "HScreenFilter 屏幕滤镜"
+            VALUE "FileVersion", "2.0.0-beta"
             VALUE "InternalName", "HScreenFilter"
             VALUE "OriginalFilename", "HScreenFilter.exe"
             VALUE "ProductName", "HScreenFilter 屏幕滤镜"
-            VALUE "ProductVersion", "1.2.7"
+            VALUE "ProductVersion", "2.0.0-beta"
         END
     END
     BLOCK "VarFileInfo"

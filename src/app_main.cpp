@@ -1,4 +1,4 @@
-// webview2_demo2.cpp — HScreenFilter WebView2 桥接版（demo2，完整功能）
+// app_main.cpp — HScreenFilter 主程序（WebView2 桥接版，完整功能）
 // 数据：profiles.json（与原版兼容）；引擎：FilterEngine 实时应用；
 // 功能：配置 CRUD/导入导出、按应用切换（前台监听）、快捷键（捕获+注册）、自启、托盘。
 
@@ -77,6 +77,7 @@ static std::vector<DisplayMonitor> monitors_;
 static int curDisplay_ = 0;
 static FilterSettings savedSnapshot_;
 static bool savedUseDxgi_ = false;
+static bool savedUseVsync_ = false;
 
 static MessageWindow msgWindow_;
 static std::unique_ptr<HotkeyService> hotkeys_;
@@ -207,9 +208,9 @@ static std::wstring EngineStatusText()
 {
     switch (FilterEngine::Instance().Kind())
     {
-    case EngineKind::PixelShader: return L"滤镜引擎：LUT 逐像素引擎（3D LUT，支持 HSL 调色）";
-    case EngineKind::FullScreenColorEffect: return L"滤镜引擎：全屏颜色效果（放大镜 API，HSL 不可用）";
-    case EngineKind::GammaRamp: return L"滤镜引擎：显卡伽马曲线（鲜艳度不可用）";
+    case EngineKind::PixelShader: return L"滤镜引擎：LUT 逐像素引擎";
+    case EngineKind::FullScreenColorEffect: return L"滤镜引擎：全屏颜色效果";
+    case EngineKind::GammaRamp: return L"滤镜引擎：显卡伽马曲线";
     default: return L"滤镜引擎不可用：" + FilterEngine::Instance().LastError();
     }
 }
@@ -275,6 +276,7 @@ static bool IsDirty()
 {
     if (!SettingsEqual(CurDisplay().Current, savedSnapshot_)) return true;
     if (data_.UseDxgi != savedUseDxgi_) return true;
+    if (CurDisplay().UseVsync != savedUseVsync_) return true;
     return false;
 }
 static void SendDirtyState()
@@ -327,6 +329,9 @@ static void UpdateWatcher()
 {
     if (!watcher_) { Log(L"[watcher] UpdateWatcher: watcher null"); return; }
     watcher_->SetTargets(data_.AppBindings);
+    // SetTargets 会立即执行一次 CheckNow，这里同步取最新命中值，
+    // 避免随后的 ApplyCurrent 仍用旧的 activeBinding_（表现为“先关后开/不立即生效”）
+    activeBinding_ = watcher_->CurrentHit();
     if (data_.PerAppEnabled)
     {
         Log(L"[watcher] UpdateWatcher: start (targets=%d)", (int)data_.AppBindings.size());
@@ -638,7 +643,7 @@ static void AddTray()
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_APP + 9;
     nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), L"APPICON");
-    wcscpy(nid.szTip, L"HScreenFilter v2.0.0-alpha");
+    swprintf(nid.szTip, 128, L"HScreenFilter %s", kVersionString);
     g_trayAdded = Shell_NotifyIconW(NIM_ADD, &nid);
     Log(L"[tray] added=%d", g_trayAdded ? 1 : 0);
 }
@@ -888,7 +893,7 @@ static void HandleMessage(JsonValue &msg)
             SendDirtyState();
             SendState(L"sync");
         }
-        else if (id == L"vsync") { CurDisplay().UseVsync = v; if (data_.UseDxgi && CurDisplay().IsEnabled) FilterEngine::Instance().SetVsync(curDisplay_, v); }
+        else if (id == L"vsync") { CurDisplay().UseVsync = v; if (data_.UseDxgi && CurDisplay().IsEnabled) FilterEngine::Instance().SetVsync(curDisplay_, v); SendDirtyState(); }
         else if (id == L"perapp") { data_.PerAppEnabled = v; UpdateWatcher(); ApplyCurrent(); }
         else if (id == L"capture") { data_.Captureable = v; FilterEngine::Instance().SetOverlayCapturable(v); }
         else if (id == L"autostart") { data_.AutoStart = v; AutoStart::Set(v); }
@@ -1007,6 +1012,7 @@ static void HandleMessage(JsonValue &msg)
         }
         savedSnapshot_ = CurDisplay().Current.Clone();
         savedUseDxgi_ = data_.UseDxgi;
+        savedUseVsync_ = CurDisplay().UseVsync;
         SaveState();
         SendDirtyState();
         SendState(L"sync");
@@ -1038,10 +1044,10 @@ static void HandleMessage(JsonValue &msg)
 }
 
 
-// ---- 开发测试钩子：读取 build/demo2-test.json 并按序喂给 HandleMessage ----
+// ---- 开发测试钩子：读取 exe 目录 app-test.json 并按序喂给 HandleMessage ----
 static void RunTestScript()
 {
-    FILE *f = _wfopen((ExeDir() + L"\\demo2-test.json").c_str(), L"rb");
+    FILE *f = _wfopen((ExeDir() + L"\\app-test.json").c_str(), L"rb");
     if (!f) { Log(L"[test] no test script"); return; }
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
     std::string bytes;
@@ -1100,7 +1106,7 @@ public:
     {
         BOOL ok = FALSE; if (args) args->get_IsSuccess(&ok);
         Log(L"[nav] success=%d", ok ? 1 : 0);
-        if (g_hwnd) SetWindowTextW(g_hwnd, L"HScreenFilter · v2.0.0-alpha（WebView2）");
+        if (g_hwnd) SetWindowTextW(g_hwnd, (Format(L"HScreenFilter %s", kVersionString)).c_str());
         return S_OK;
     }
 };
@@ -1128,7 +1134,7 @@ public:
 static void SavePreview()
 {
     if (!g_webview) return;
-    std::wstring outPath = ExeDir() + L"\\webview2_demo2_preview.png";
+    std::wstring outPath = ExeDir() + L"\\HScreenFilter-preview.png";
     IStream *stream = nullptr;
     if (FAILED(SHCreateStreamOnFileW(outPath.c_str(), STGM_CREATE | STGM_WRITE | STGM_SHARE_EXCLUSIVE, &stream))) return;
     g_webview->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream, new PreviewDoneHandler());
@@ -1235,7 +1241,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == SIZE_MINIMIZED && data_.MinimizeToTray)
         {
             ShowWindow(hwnd, SW_HIDE);
-            ShowTrayBalloon(L"HScreenFilter demo2", L"已最小化到系统托盘，双击图标可恢复。");
+            ShowTrayBalloon(kAppName, L"已最小化到系统托盘，双击图标可恢复。");
         }
         else ResizeWebView();
         return 0;
@@ -1252,7 +1258,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_CLOSE:
         if (g_exitRequested) { DestroyWindow(hwnd); }
-        else { ShowWindow(hwnd, SW_HIDE); ShowTrayBalloon(L"HScreenFilter demo2", L"已最小化到系统托盘。"); }
+        else { ShowWindow(hwnd, SW_HIDE); ShowTrayBalloon(kAppName, L"已最小化到系统托盘。"); }
         return 0;
     case WM_DESTROY:
         if (watcher_) watcher_->Stop();
@@ -1317,14 +1323,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    g_logPath = ExeDir() + L"\\webview2_demo2.log";
-    Log(L"=== HScreenFilter v2.0.0-alpha (WebView2) start ===");
+    g_logPath = ExeDir() + L"\\HScreenFilter.log";
+    Log(L"=== HScreenFilter %s start ===", kVersionString);
 
     // 数据 + 引擎
     data_ = g_store.Load();
     InitializeDisplays();
     savedSnapshot_ = CurDisplay().Current.Clone();
     savedUseDxgi_ = data_.UseDxgi;
+    savedUseVsync_ = CurDisplay().UseVsync;
 
     FilterEngine::Instance().SetUseDxgi(data_.UseDxgi);
     FilterEngine::Instance().Initialize();
@@ -1362,7 +1369,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     if (!LoadWebView2Loader())
     {
         Log(L"[init] WebView2Loader.dll 未找到");
-        MessageBoxW(nullptr, L"未找到 WebView2Loader.dll，请将其放在本程序同目录。", L"demo2", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"未找到 WebView2Loader.dll，请将其放在本程序同目录。", kAppName, MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -1374,7 +1381,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hIcon = LoadIconW(hInst, L"APPICON");
     wc.hIconSm = LoadIconW(hInst, L"APPICON");
-    wc.lpszClassName = L"HSFWebView2Demo2Window";
+    wc.lpszClassName = L"HScreenFilterMainWindow";
     RegisterClassExW(&wc);
 
     HDC hdc = GetDC(nullptr);
@@ -1407,7 +1414,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     AdjustWindowRectEx(&rc, style, FALSE, 0);
     g_wndW = rc.right - rc.left; g_wndH = rc.bottom - rc.top;
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"HScreenFilter · v2.0.0-alpha（WebView2）",
+    std::wstring wndTitle = Format(L"HScreenFilter %s", kVersionString);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, wndTitle.c_str(),
                                 style, (sx - g_wndW) / 2, (sy - g_wndH) / 3, g_wndW, g_wndH,
                                 nullptr, nullptr, hInst, nullptr);
     if (!hwnd) { Log(L"[init] CreateWindow failed: %lu", GetLastError()); return 1; }
@@ -1421,7 +1429,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     wchar_t la[512];
     std::wstring userData;
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", la, 512))
-        userData = std::wstring(la) + L"\\HScreenFilter\\WebView2Demo2";
+        userData = std::wstring(la) + L"\\HScreenFilter\\Browser";
 
     bool startHidden = AutoStartLaunched() && data_.MinimizeToTray;
     if (!startHidden) ShowWindow(hwnd, SW_SHOW);
@@ -1433,7 +1441,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
 
-    Log(L"=== demo2 exit ===");
+    Log(L"=== HScreenFilter exit ===");
     if (SUCCEEDED(coInit)) CoUninitialize();
     return (int)m.wParam;
 }

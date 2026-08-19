@@ -1,4 +1,4 @@
-# HScreenFilter 屏幕滤镜 · v2.0.0-alpha
+# HScreenFilter 屏幕滤镜 · v2.0.0-beta
 
 **WebView2 桥接版**：C++17 滤镜引擎 + Flat Design 网页 UI（Edge WebView2 承载），
 滑块/开关实时驱动真实的滤镜引擎（3D LUT 逐像素 / 放大镜 / 伽马），数据与旧版完全兼容。
@@ -48,14 +48,14 @@
 
 ```powershell
 .\build.ps1                  # 主程序（C++ 原生版，输出 build\HScreenFilter.exe）
-.\build-webview2-demo2.ps1   # v2.0.0-alpha WebView2 版（输出 dist\HScreenFilter-v2.0.0-alpha\）
+.\build-release.ps1          # v2.0.0-beta 发布版（输出 dist\HScreenFilter-v2.0.0-beta\ + zip）
 ```
 
 ## 🚀 运行
 
 ```powershell
 .\build\HScreenFilter.exe --selftest   # 主程序自检
-dist\HScreenFilter-v2.0.0-alpha\webview2_demo2.exe   # WebView2 版（需系统已装 WebView2 Runtime）
+dist\HScreenFilter-v2.0.0-beta\HScreenFilter.exe   # 发布版（需系统已装 WebView2 Runtime）
 ```
 
 ## 📁 源码结构
@@ -69,7 +69,7 @@ src\
 │   ├── lut_engine.*            # DXGI 覆盖层 + 桌面捕获 + 3D LUT 管线（主引擎）
 │   ├── mag_engine.* / gamma_engine.* / filter_engine.*
 ├── ui\main_window.*            # C++ 原生版 UI（legacy 交互参照）
-└── webview2_demo2.cpp          # v2.0.0-alpha WebView2 宿主（桥接引擎与页面）
+└── app_main.cpp                # 发布版宿主（桥接引擎与页面）
 webui2\                         # Flat Design UI（index.html / styles.css / app.js）
 previews\                       # 界面效果图
 ```

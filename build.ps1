@@ -7,6 +7,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $tc = $env:LLVM_MINGW
 if (-not $tc -or -not (Test-Path $tc)) {
     $candidates = @(
+        "$root\tools\llvm-mingw-beta\llvm-mingw-20260616-ucrt-x86_64",
         "F:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "$env:LOCALAPPDATA\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "C:\llvm-mingw"
@@ -46,9 +47,11 @@ $srcs = @(
     "src\main.cpp"
 ) | ForEach-Object { Join-Path $root $_ }
 
-# Resource compilation (icon + version info)
-& $windres "$root\src\app.rc" -O coff -o "$out\app_res.o" 2>$null
-if ($LASTEXITCODE -ne 0) { throw "windres failed" }
+# Resource compilation (icon + version info); rc is UTF-8, set codepage explicitly
+# so Chinese version strings are not mangled in the resources.
+# Use Start-Process to get the real exit code ($LASTEXITCODE may be unset under -Command).
+$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', "$root\src\app.rc", '-O', 'coff', '-o', "$out\app_res.o") -Wait -NoNewWindow -PassThru
+if ($resProc.ExitCode -ne 0) { throw "windres failed (exit $($resProc.ExitCode))" }
 
 # Compile flags (link-only flags like -mwindows are NOT used here)
 $commonFlags = @(

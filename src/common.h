@@ -44,6 +44,9 @@ inline const wchar_t* kOverlayWindowClass = L"HScreenFilterVorticeOverlay";
 inline const wchar_t* kAppName = L"HScreenFilter";
 inline const wchar_t* kAppNameCn = L"屏幕滤镜";
 
+// 版号标识（便捷：窗口标题/托盘/日志统一引用，升级版本只改这一处）
+inline const wchar_t* kVersionString = L"v2.0.0-beta";
+
 // 自定义修饰键掩码（MOD_WIN 为扩展；MOD_ALT/MOD_CONTROL/MOD_SHIFT 用系统宏）
 constexpr int kModWin = 0x8;
 constexpr long kWsExTopmost = 0x00000008L;

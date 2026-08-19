@@ -75,7 +75,8 @@ bool MainWindow::Create(HINSTANCE hInst)
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     int x = (sx - w) / 2, y = (sy - h) / 3;
 
-    hwnd_ = CreateWindowExW(0, L"HScreenFilterMainWindow", L"HScreenFilter",
+    std::wstring wndTitle = Format(L"HScreenFilter %s", kVersionString);
+    hwnd_ = CreateWindowExW(0, L"HScreenFilterMainWindow", wndTitle.c_str(),
                             wndStyle, x, y, w, h, nullptr, nullptr, hInst, this);
     if (!hwnd_) return false;
 
@@ -415,10 +416,10 @@ void MainWindow::BuildPageHsl()
 {
     int x = cx0_, w = cx1_ - cx0_;
     int y = cy0_ + 4;
-    AddStatic(0, L"HSL 调色盘（3D LUT）", x, y, 260, 26, 15, true);
+    AddStatic(0, L"HSL 调色盘", x, y, 260, 26, 15, true);
     AddStatic(0, L"按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。", x + 270, y + 2, w - 270, 20, 11);
-    pgLutSwitch = AddCheck(IDC_LUT_SWITCH, L"LUT 引擎开关（开启 = 3D LUT 逐像素引擎，支持 HSL）", x, y + 38, w, 26);
-    pgVsyncSwitch = AddCheck(IDC_VSYNC_SWITCH, L"垂直同步 V-Sync（防撕裂）", x, y + 70, w, 26);
+    pgLutSwitch = AddCheck(IDC_LUT_SWITCH, L"LUT 引擎开关", x, y + 38, w, 26);
+    pgVsyncSwitch = AddCheck(IDC_VSYNC_SWITCH, L"垂直同步 V-Sync", x, y + 70, w, 26);
     pgHslTab = AddTab(IDC_HSL_TAB, x, y + 106, w, 28, { L"色相", L"饱和度", L"明亮度" });
     CheckDlgButton(hwnd_, IDC_LUT_SWITCH, data_.UseDxgi ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(hwnd_, IDC_VSYNC_SWITCH, CurrentDisplay().UseVsync ? BST_CHECKED : BST_UNCHECKED);
@@ -1154,13 +1155,13 @@ void MainWindow::UpdateEngineStatus()
     switch (FilterEngine::Instance().Kind())
     {
     case EngineKind::PixelShader:
-        SetWindowTextW(hStatus, L"滤镜引擎：LUT 逐像素引擎（3D LUT，支持 HSL 调色）");
+        SetWindowTextW(hStatus, L"滤镜引擎：LUT 逐像素引擎");
         break;
     case EngineKind::FullScreenColorEffect:
-        SetWindowTextW(hStatus, L"滤镜引擎：全屏颜色效果（放大镜 API，HSL 不可用）");
+        SetWindowTextW(hStatus, L"滤镜引擎：全屏颜色效果");
         break;
     case EngineKind::GammaRamp:
-        SetWindowTextW(hStatus, L"滤镜引擎：显卡伽马曲线（鲜艳度不可用）");
+        SetWindowTextW(hStatus, L"滤镜引擎：显卡伽马曲线");
         break;
     default:
         SetWindowTextW(hStatus, (L"滤镜引擎不可用：" + FilterEngine::Instance().LastError()).c_str());
@@ -1174,8 +1175,8 @@ void MainWindow::UpdateHslHint()
     if (!pgHslHint) return;
     SetWindowTextW(pgHslHint,
         FilterEngine::Instance().Kind() == EngineKind::PixelShader
-            ? L"已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰（64³ 3D LUT 逐像素着色器）。"
-            : L"提示：关闭 LUT 引擎后使用放大镜引擎，暂不支持分色系 HSL。");
+            ? L"已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰。如开启 AI 补帧，建议配合垂直同步使用。"
+            : L"提示：当前使用放大镜/伽马引擎，暂不支持分色系 HSL。");
 }
 
 void MainWindow::OnLutSwitchToggled()
@@ -1188,7 +1189,7 @@ void MainWindow::OnLutSwitchToggled()
         CheckDlgButton(hwnd_, IDC_LUT_SWITCH, BST_UNCHECKED);
         lutInit_ = false;
         if (ConfirmDialog(hwnd_, L"启用 LUT 引擎",
-                          L"启用 LUT 引擎后 HSL 功能可用，但会造成性能损失，是否启用？", L"启用"))
+                          L"启用 LUT 引擎后 HSL 功能可用；若同时开启 AI 补帧（AFMF），建议一并开启垂直同步。是否启用？", L"启用"))
         {
             lutInit_ = true;
             CheckDlgButton(hwnd_, IDC_LUT_SWITCH, BST_CHECKED);

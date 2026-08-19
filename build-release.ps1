@@ -1,10 +1,11 @@
-# build-webview2-demo2.ps1 — 构建 demo2（WebView2 桥接版，链接真实数据层 + 滤镜引擎）
+# build-release.ps1 — 构建发布版 HScreenFilter（WebView2 桥接版，链接真实数据层 + 滤镜引擎）
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $tc = $env:LLVM_MINGW
 if (-not $tc -or -not (Test-Path $tc)) {
     $candidates = @(
+        "$root\tools\llvm-mingw-beta\llvm-mingw-20260616-ucrt-x86_64",
         "F:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "$env:LOCALAPPDATA\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "C:\llvm-mingw"
@@ -15,11 +16,11 @@ if (-not $tc -or -not (Test-Path "$tc\bin\clang++.exe")) { throw "llvm-mingw too
 
 $clang = "$tc\bin\clang++.exe"
 $windres = "$tc\bin\windres.exe"
-$out = Join-Path $root 'dist\HScreenFilter-v2.0.0-alpha'
+$out = Join-Path $root 'dist\HScreenFilter-v2.0.0-beta'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $srcs = @(
-    "src\webview2_demo2.cpp",
+    "src\app_main.cpp",
     "src\common.cpp", "src\log.cpp", "src\json.cpp", "src\models.cpp",
     "src\store.cpp", "src\monitors.cpp", "src\autostart.cpp",
     "src\msgwindow.cpp", "src\hotkeys.cpp", "src\fgwatcher.cpp",
@@ -42,11 +43,13 @@ $links = @(
 )
 
 Write-Host "Compiling resource ..."
-& $windres "$root\src\demo2.rc" -O coff -o "$root\build\demo2_res.o" 2>$null
-if ($LASTEXITCODE -ne 0) { throw "windres failed" }
+# rc 为 UTF-8 编码，显式指定代码页，否则中文版本信息在资源里乱码。
+# 用 Start-Process 拿退出码（$LASTEXITCODE 在 -Command 调用脚本时可能不被设置）
+$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', "$root\src\release.rc", '-O', 'coff', '-o', "$root\build\release_res.o") -Wait -NoNewWindow -PassThru
+if ($resProc.ExitCode -ne 0) { throw "windres failed (exit $($resProc.ExitCode))" }
 
 Write-Host "Compiling $($srcs.Count) sources ..."
-& $clang "$root\build\demo2_res.o" @flags @srcs @links -o "$out\webview2_demo2.exe" 2>&1
+& $clang "$root\build\release_res.o" @flags @srcs @links -o "$out\HScreenFilter.exe" 2>&1
 if ($LASTEXITCODE -ne 0) { throw "compile failed" }
 
 Copy-Item "$root\tools\webview2\x64\WebView2Loader.dll" "$out\WebView2Loader.dll" -Force
@@ -54,7 +57,16 @@ $dstWeb = Join-Path $out 'webui2'
 if (Test-Path $dstWeb) { Remove-Item $dstWeb -Recurse -Force }
 Copy-Item "$root\webui2" $dstWeb -Recurse -Force
 
+# 清理旧产物（防止旧命名/日志/预览图混入发布包）
+Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match 'webview2_demo2|\.log$|preview\.png$' } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+# 打包发布 zip
+$zip = Join-Path $root 'dist\HScreenFilter-v2.0.0-beta.zip'
+if (Test-Path $zip) { Remove-Item $zip -Force }
+Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
+
 Write-Host ""
-Write-Host "Build OK: $out\webview2_demo2.exe"
-Write-Host "Run:      $out\webview2_demo2.exe"
-Write-Host "Version:  v2.0.0-alpha"
+Write-Host "Build OK: $out\HScreenFilter.exe"
+Write-Host "Run:      $out\HScreenFilter.exe"
+Write-Host "Package:  $zip"
+Write-Host "Version:  v2.0.0-beta"

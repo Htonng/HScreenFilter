@@ -7,6 +7,7 @@ namespace hsf {
 
 static constexpr uint32_t kDxgiErrorWaitTimeout = 0x887A0027;
 static constexpr uint32_t kDxgiErrorAccessLost = 0x887A0026;
+static constexpr uint32_t kDxgiErrorNotCurrentlyAvailable = 0x887A0021;
 
 // 调色强度系数（与旧版一致：只减半“相对中性值”的偏差，不改动用户保存的参数）
 static constexpr double kAdjustStrength = 0.75;
@@ -53,21 +54,7 @@ bool LutEngine::Start(int x, int y, int width, int height, int outputIndex)
     x_ = x; y_ = y; width_ = width; height_ = height; outputIndex_ = outputIndex;
     try
     {
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                       D3D11_SDK_VERSION, device_.GetAddressOf(), nullptr, context_.GetAddressOf());
-        if (FAILED(hr))
-        {
-            // 无 GPU（虚拟机/远程桌面）→ 回退 WARP 软件光栅化
-            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                   D3D11_SDK_VERSION, device_.GetAddressOf(), nullptr, context_.GetAddressOf());
-        }
-        if (FAILED(hr))
-        {
-            LastError = Format(L"D3D11CreateDevice 失败 (0x%08X)", (unsigned)hr);
-            return false;
-        }
+        if (!CreateDevice()) return false;
 
         CreateOverlayWindow();
         if (!hwnd_) return false;
@@ -118,6 +105,9 @@ void LutEngine::CreateOverlayWindow()
 
     // 点击穿透必须 WS_EX_LAYERED | WS_EX_TRANSPARENT；
     // 不能加 WS_EX_TOOLWINDOW（OBS 窗口捕获会过滤工具窗口）
+    // 注意：WS_VISIBLE 必须在创建时就有 —— flip 模型交换链首次 Present 到从未
+    // 显示过的隐藏窗口会永久阻塞（公开测试发现的卡死根因）。分层窗口 alpha 必须
+    // 显式初始化（否则部分驱动/显卡会花屏或黑屏）。
     DWORD exStyle = WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
     DWORD style = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS;
 
@@ -129,6 +119,10 @@ void LutEngine::CreateOverlayWindow()
         LastError = Format(L"CreateWindowExW 失败 (0x%08X)", (unsigned)GetLastError());
         return;
     }
+
+    // 分层窗口必须显式初始化 alpha（不调用的话 DWM 对覆盖层的合成状态未定义，
+    // 部分驱动/显卡会显示花屏或黑屏）
+    SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
 
     ApplyOverlayAffinity();
 
@@ -179,6 +173,16 @@ void LutEngine::CreateSwapChain()
 
     HRESULT hr = factory->CreateSwapChainForHwnd(device_.Get(), hwnd_, &desc, nullptr, nullptr,
                                                  swapChain_.GetAddressOf());
+    if (FAILED(hr) && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL)
+    {
+        // 部分驱动/显卡不支持分层窗口 + flip 模型（黑屏/花屏的常见原因）→ 回退传统 DISCARD
+        desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        desc.Flags = 0;
+        hr = factory->CreateSwapChainForHwnd(device_.Get(), hwnd_, &desc, nullptr, nullptr,
+                                             swapChain_.GetAddressOf());
+        if (SUCCEEDED(hr))
+            Log::Write(L"LutEngine", L"交换链回退为 DISCARD（分层窗口 + flip 不可用）");
+    }
     if (FAILED(hr))
     {
         LastError = Format(L"CreateSwapChainForHwnd 失败 (0x%08X)", (unsigned)hr);
@@ -288,26 +292,144 @@ bool LutEngine::CreatePipeline()
 
 // ---------------- 捕获 ----------------
 
+bool LutEngine::FindOutput(ComPtr<IDXGIAdapter>& adapter, ComPtr<IDXGIOutput>& output)
+{
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) return false;
+    for (UINT ai = 0;; ai++)
+    {
+        ComPtr<IDXGIAdapter> a;
+        if (factory->EnumAdapters(ai, a.GetAddressOf()) != S_OK) break;
+        for (UINT oi = 0;; oi++)
+        {
+            ComPtr<IDXGIOutput> o;
+            if (a->EnumOutputs(oi, o.GetAddressOf()) != S_OK) break;
+            DXGI_OUTPUT_DESC d{};
+            if (SUCCEEDED(o->GetDesc(&d)) &&
+                x_ >= d.DesktopCoordinates.left && x_ < d.DesktopCoordinates.right &&
+                y_ >= d.DesktopCoordinates.top && y_ < d.DesktopCoordinates.bottom)
+            {
+                adapter = a;
+                output = o;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool LutEngine::CreateDevice()
+{
+    // 笔记本混合显卡（Optimus/双卡）：默认适配器可能是核显或错误的那块 GPU，
+    // 导致 DuplicateOutput 失败 → 引擎回退伽马 → 鲜艳度/HSL 全部失效。
+    // 先找到真正驱动目标显示器的适配器来创建设备。
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIOutput> output;
+    if (FindOutput(adapter, output))
+    {
+        HRESULT hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                       D3D11_SDK_VERSION, device_.GetAddressOf(), nullptr,
+                                       context_.GetAddressOf());
+        if (SUCCEEDED(hr))
+        {
+            adapter_ = adapter;
+            output_ = output;
+            return true;
+        }
+        device_.Reset();
+        context_.Reset();
+    }
+
+    // 回退：默认硬件适配器 → WARP 软件光栅化（虚拟机/远程桌面）
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                   D3D11_SDK_VERSION, device_.GetAddressOf(), nullptr,
+                                   context_.GetAddressOf());
+    if (SUCCEEDED(hr)) return true;
+    device_.Reset();
+    context_.Reset();
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                           D3D11_SDK_VERSION, device_.GetAddressOf(), nullptr,
+                           context_.GetAddressOf());
+    if (FAILED(hr))
+    {
+        LastError = Format(L"D3D11CreateDevice 失败 (0x%08X)", (unsigned)hr);
+        return false;
+    }
+    return true;
+}
+
 void LutEngine::CreateCapture()
 {
-    ComPtr<IDXGIDevice> dxgiDevice;
-    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(dxgiDevice.GetAddressOf())))) return;
+    // 按坐标匹配输出而不是按索引：EnumDisplayMonitors 与 EnumOutputs 的顺序
+    // 不一定一致，多显示器时按索引可能捕获到错误的屏幕（导致滤镜作用错屏）。
     ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(dxgiDevice->GetAdapter(adapter.GetAddressOf()))) return;
     ComPtr<IDXGIOutput> output;
-    if (FAILED(adapter->EnumOutputs((UINT)outputIndex_, output.GetAddressOf())) || !output)
+    if (!FindOutput(adapter, output))
     {
-        LastError = Format(L"EnumOutputs(%d) 失败", outputIndex_);
+        LastError = Format(L"未找到坐标 (%d,%d) 对应的 DXGI 输出", x_, y_);
         return;
     }
     ComPtr<IDXGIOutput1> output1;
-    if (FAILED(output->QueryInterface(IID_PPV_ARGS(output1.GetAddressOf())))) return;
+    if (FAILED(output->QueryInterface(IID_PPV_ARGS(output1.GetAddressOf()))))
+    {
+        LastError = L"IDXGIOutput1 不可用";
+        return;
+    }
     HRESULT hr = output1->DuplicateOutput(device_.Get(), duplication_.GetAddressOf());
+    // 启动瞬间显卡可能暂时不可用（显示器刚切换/驱动忙），短暂重试几次
+    for (int attempt = 0; FAILED(hr) && attempt < 3; attempt++)
+    {
+        if (hr != kDxgiErrorNotCurrentlyAvailable) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        hr = output1->DuplicateOutput(device_.Get(), duplication_.GetAddressOf());
+    }
     if (FAILED(hr))
     {
         LastError = Format(L"DuplicateOutput 失败 (0x%08X)", (unsigned)hr);
         duplication_.Reset();
+        return;
     }
+    adapter_ = adapter;
+    output_ = output;
+}
+
+void LutEngine::EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src)
+{
+    if (!src || !frameTexture_) return;
+    D3D11_TEXTURE2D_DESC cur{}, srcDesc{};
+    frameTexture_->GetDesc(&cur);
+    src->GetDesc(&srcDesc);
+    if (cur.Width == srcDesc.Width && cur.Height == srcDesc.Height && cur.Format == srcDesc.Format)
+        return;
+    // 分辨率/格式（如 HDR）变化：重建帧纹理，否则 CopyResource 失败 → 黑屏/花屏
+    frameSrv_.Reset();
+    frameTexture_.Reset();
+    D3D11_TEXTURE2D_DESC texDesc{};
+    src->GetDesc(&texDesc);
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&texDesc, nullptr, frameTexture_.GetAddressOf()))) return;
+    device_->CreateShaderResourceView(frameTexture_.Get(), nullptr, frameSrv_.GetAddressOf());
+}
+
+void LutEngine::EnsureSwapChainSize(UINT w, UINT h)
+{
+    if ((int)w == width_ && (int)h == height_) return;
+    width_ = (int)w;
+    height_ = (int)h;
+    backBufferTex_.Reset();
+    for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
+    if (swapChain_)
+        swapChain_->ResizeBuffers(2, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+    if (hwnd_)
+        SetWindowPos(hwnd_, HWND_TOPMOST, x_, y_, (int)w, (int)h,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 // ---------------- 渲染循环 ----------------
@@ -317,9 +439,11 @@ void LutEngine::RenderLoop()
     int frameCount = 0;
     while (running_)
     {
+        bool neutralNow = neutral_.load();
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
         ComPtr<IDXGIResource> resource;
-        HRESULT hr = duplication_->AcquireNextFrame(100, &frameInfo, resource.GetAddressOf());
+        HRESULT hr = duplication_->AcquireNextFrame(neutralNow ? 500u : 100u,
+                                                    &frameInfo, resource.GetAddressOf());
         if (SUCCEEDED(hr))
         {
             if (resource)
@@ -327,17 +451,39 @@ void LutEngine::RenderLoop()
                 ComPtr<ID3D11Texture2D> tex;
                 if (SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(tex.GetAddressOf()))))
                 {
-                    // GPU 内拷贝：捕获帧 → 渲染纹理（无 CPU 往返）
+                    // 分辨率/格式变化：先重建纹理与交换链，避免 CopyResource 失败
+                    D3D11_TEXTURE2D_DESC d{};
+                    tex->GetDesc(&d);
+                    EnsureSwapChainSize(d.Width, d.Height);
+                    EnsureFrameTexture(tex);
+                    // GPU 内拷贝：捕获帧 → 渲染纹理（无 CPU 往返）。
+                    // 中性参数也照常拷贝+呈现（直通），否则 flip 交换链的覆盖层
+                    // 内容会卡在旧帧。
                     context_->CopyResource(frameTexture_.Get(), tex.Get());
+                    duplication_->ReleaseFrame();
+                    DrawAndPresent();
+                }
+                else
+                {
+                    duplication_->ReleaseFrame();
                 }
             }
-            duplication_->ReleaseFrame();
-            DrawAndPresent();
-            if (++frameCount == 30) RenderSelfCheck();
+            else
+            {
+                duplication_->ReleaseFrame();
+            }
+            // 自检只做一次：原来每 30 帧整屏读回会卡 GPU（4060 上明显卡顿的元凶之一）
+            if (!selfChecked_ && ++frameCount >= 30)
+            {
+                selfChecked_ = true;
+                RenderSelfCheck();
+            }
         }
         else if (hr == kDxgiErrorWaitTimeout)
         {
-            continue; // 桌面无变化
+            // 桌面无新帧：若参数刚变化（静态画面下调滑块），用最近一帧补一次重绘
+            if (paramsDirty_.load())
+                DrawAndPresent();
         }
         else if (hr == kDxgiErrorAccessLost)
         {
@@ -358,6 +504,8 @@ void LutEngine::RenderLoop()
 bool LutEngine::RecoverCapture()
 {
     duplication_.Reset();
+    adapter_.Reset();
+    output_.Reset();
     CreateCapture();
     if (!duplication_)
     {
@@ -393,15 +541,17 @@ void LutEngine::DrawAndPresent()
         }
     }
 
-    // 2) 绘制（flip 模型交换链：缓冲在 Present 后轮转，必须每帧重新获取后缓冲，
-    //    否则缓存的 RTV 指向已释放表面 → d3d11.dll 访问违例）
+    // 2) 绘制：每捕获到一帧就立即呈现一次，让覆盖层与桌面源帧 1:1 锁步。
+    //    flip 模型交换链的 2 缓冲队列会在 DWM 合成边界自然限速，无需再用
+    //    QPC 软件节流（软件节流会丢帧、并与 AI 补帧/高刷产生错相位 → 果冻）。
     ComPtr<ID3D11Texture2D> backBuffer;
     if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(backBuffer.GetAddressOf()))))
         return;
     backBufferTex_ = backBuffer;
-    rtv_.Reset();
-    if (FAILED(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, rtv_.GetAddressOf())))
-        return;
+    // 按缓冲身份缓存 RTV：flip 模型后缓冲每帧在 2 个缓冲间轮转，
+    // 单槽缓存会退化为每帧重建 RTV（4060 上明显卡顿的原因之一）。
+    ID3D11RenderTargetView* rtv = GetBackBufferRtv(backBuffer.Get());
+    if (!rtv) return;
 
     if (neutral_.load())
     {
@@ -411,8 +561,8 @@ void LutEngine::DrawAndPresent()
     else
     {
         const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
-        context_->ClearRenderTargetView(rtv_.Get(), clearColor);
-        context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
+        context_->ClearRenderTargetView(rtv, clearColor);
+        context_->OMSetRenderTargets(1, &rtv, nullptr);
         D3D11_VIEWPORT vp{ 0, 0, (float)width_, (float)height_, 0, 1 };
         context_->RSSetViewports(1, &vp);
         context_->RSSetState(rasterizer_.Get());
@@ -433,9 +583,38 @@ void LutEngine::DrawAndPresent()
     swapChain_->Present(syncInterval, 0);
 }
 
+ID3D11RenderTargetView* LutEngine::GetBackBufferRtv(ID3D11Texture2D* buffer)
+{
+    if (!buffer) return nullptr;
+    for (auto& slot : backBufferRtv_)
+    {
+        if (slot.tex.Get() == buffer)
+            return slot.rtv.Get();
+    }
+    for (auto& slot : backBufferRtv_)
+    {
+        if (!slot.tex)
+        {
+            slot.tex = buffer;
+            if (FAILED(device_->CreateRenderTargetView(buffer, nullptr, slot.rtv.GetAddressOf())))
+                return nullptr;
+            return slot.rtv.Get();
+        }
+    }
+    // 槽已满（BufferCount 被调大时才会发生）：复用最旧的一槽
+    backBufferRtv_[0].tex.Reset();
+    backBufferRtv_[0].rtv.Reset();
+    backBufferRtv_[0].tex = buffer;
+    if (FAILED(device_->CreateRenderTargetView(buffer, nullptr, backBufferRtv_[0].rtv.GetAddressOf())))
+        return nullptr;
+    return backBufferRtv_[0].rtv.Get();
+}
+
 void LutEngine::RenderSelfCheck()
 {
     // 从 back buffer 读回中心像素，黑屏时记录日志
+    // 中性参数时覆盖层可能从未呈现过（backBufferTex_ 为空），直接跳过
+    if (!backBufferTex_) return;
     try
     {
         ComPtr<ID3D11Texture2D> staging;
@@ -467,6 +646,8 @@ void LutEngine::RenderSelfCheck()
 void LutEngine::ReleaseAll()
 {
     duplication_.Reset();
+    adapter_.Reset();
+    output_.Reset();
     lutUav_.Reset();
     lutSrv_.Reset();
     lutTexture_.Reset();
@@ -481,7 +662,7 @@ void LutEngine::ReleaseAll()
     cs_.Reset();
     inputSampler_.Reset();
     lutSampler_.Reset();
-    rtv_.Reset();
+    for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
     backBufferTex_.Reset();
     swapChain_.Reset();
     context_.Reset();

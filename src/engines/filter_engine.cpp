@@ -166,6 +166,12 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
     }
     if (kind_ == EngineKind::GammaRamp)
     {
+        if (s.Saturation != 100.0)
+        {
+            Log::Write(L"FilterEngine",
+                       L"注意：当前使用伽马曲线引擎，鲜艳度（饱和度）无法生效；"
+                       L"启用 LUT 引擎或改用放大镜引擎后鲜艳度才可用");
+        }
         return GammaEngine::Apply(s);
     }
     return false;
@@ -212,7 +218,12 @@ void FilterEngine::SetOverlayCapturable(bool capturable)
     capturable_ = capturable;
     for (auto& kv : lutEngines_)
     {
-        if (kv.second) kv.second->Capturable = capturable;
+        if (kv.second)
+        {
+            kv.second->Capturable = capturable;
+            // 立即应用 WDA 标志（只改标志位不会让 DWM 重新合成覆盖层）
+            kv.second->ApplyOverlayAffinity();
+        }
     }
 }
 

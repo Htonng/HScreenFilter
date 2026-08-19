@@ -13,7 +13,7 @@
   <header class="app-header">
     <div class="brand">HScreenFilter</div>
     <div class="engine-status" id="engineStatus">
-      <span class="dot"></span>滤镜引擎：LUT 逐像素引擎（3D LUT，支持 HSL 调色）
+      <span class="dot"></span>滤镜引擎：LUT 逐像素引擎
     </div>
     <button class="btn" id="btnDebug">调试日志</button>
   </header>
@@ -103,14 +103,19 @@
       <!-- ─────────── HSL 调色盘 ─────────── -->
       <section class="page" id="page-hsl">
         <div class="page-head">
-          <h1>HSL 调色盘（3D LUT）</h1>
+          <h1>HSL 调色盘</h1>
           <p>按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。</p>
         </div>
         <div class="hsl-options">
           <label class="toggle-row">
             <input type="checkbox" id="lutSwitch" checked>
             <span class="track"><span class="knob"></span></span>
-            <span class="toggle-label">LUT 引擎开关 <em>（3D LUT 逐像素引擎，支持 HSL）</em></span>
+            <span class="toggle-label">LUT 引擎开关</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="vsyncSwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">垂直同步 V-Sync</span>
           </label>
         </div>
         <div class="hsl-tabs" id="hslTabs">

@@ -45,7 +45,7 @@ const state = {
   },
   hslField: 0,
   displays: [], displayIndex: 0,
-  master: false, lut: false, perapp: false,
+  master: false, lut: false, vsync: false, perapp: false,
   autostart: false, autotray: true,
   globalHotkey: '', engineText: '',
   profiles: [], activeProfile: -1, bindings: [],
@@ -127,9 +127,9 @@ function defaultState() {
     type: 'init',
     displays: [{ index: 0, label: '主显示器（1920 × 1080）', enabled: false }],
     displayIndex: 0,
-    master: false, lut: true, perapp: false,
+    master: false, lut: true, vsync: false, perapp: false,
     autostart: false, autotray: true, globalHotkey: '',
-    engine: '滤镜引擎：LUT 逐像素引擎（3D LUT，支持 HSL 调色）',
+    engine: '滤镜引擎：LUT 逐像素引擎',
     profiles: [], activeProfile: -1, bindings: [],
     settings: {
       base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0 },
@@ -147,6 +147,7 @@ function applyState(p) {
   state.displays = p.displays || state.displays;
   state.displayIndex = (typeof p.displayIndex === 'number') ? p.displayIndex : 0;
   state.master = !!p.master; state.lut = !!p.lut;
+  state.vsync = !!p.vsync;
   state.perapp = !!p.perapp;
   state.autostart = !!p.autostart; state.autotray = !!p.autotray;
   state.globalHotkey = p.globalHotkey || '';
@@ -178,6 +179,7 @@ function applyControls() {
   $('#displayEnable').checked = state.displays[state.displayIndex] ? state.displays[state.displayIndex].enabled : false;
   $('#displayEnableText').textContent = $('#displayEnable').checked ? '启用（已开）' : '启用（已关）';
   $('#lutSwitch').checked = state.lut;
+  $('#vsyncSwitch').checked = state.vsync;
   $('#perAppSwitch').checked = state.perapp;
   $('#autoStartSwitch').checked = state.autostart;
   $('#autoTraySwitch').checked = state.autotray;
@@ -436,20 +438,27 @@ function openNameModal(title, initial, onOk) {
     () => onOk($('#modalInput').value.trim()), '确定');
 }
 function openBindingModal(binding, presetProcess, presetTitle) {
+  const isEdit = !!binding;
   const b = binding || { process: presetProcess || '', title: presetTitle || '', profile: 0 };
-  const opts = state.profiles.map((p, i) => '<option value="' + i + '">' + esc(p.name) + '</option>').join('');
-  const profileIdx = Math.min(b.profile, Math.max(0, state.profiles.length - 1));
-  openModal('添加检测应用',
+  const opts = '<option value="-1">按当前设置</option>' +
+    state.profiles.map((p, i) => '<option value="' + i + '">' + esc(p.name) + '</option>').join('');
+  // 第一项是「按当前设置」(profile=-1)，配置索引在列表中整体 +1
+  const profileIdx = Math.max(-1, Math.min(b.profile, state.profiles.length - 1));
+  openModal(isEdit ? '编辑检测应用' : '添加检测应用',
     '<div class="modal-field"><label>进程名（如 chrome.exe）</label><input id="mProcess" type="text" value="' + esc(b.process) + '"></div>' +
     '<div class="modal-field"><label>窗口标题包含（可选）</label><input id="mTitle" type="text" value="' + esc(b.title) + '"></div>' +
     '<div class="modal-field"><label>绑定配置</label><select id="mProfile">' + opts + '</select></div>',
-    () => onOk({
-      process: $('#mProcess').value.trim(),
-      title: $('#mTitle').value.trim(),
-      profile: +$('#mProfile').value,
-    }), '添加');
+    () => {
+      // 直接发送绑定消息（此前的实现引用了一个不存在的 onOk 参数，
+      // 导致点击“添加”抛 ReferenceError、消息从未发出、列表永远为空）
+      const process = $('#mProcess').value.trim();
+      const title = $('#mTitle').value.trim();
+      const profile = +$('#mProfile').value;
+      if (isEdit) send({ type: 'binding', action: 'edit', index: state.selectedBinding, process: process, title: title, profile: profile });
+      else send({ type: 'binding', action: 'add', process: process, title: title, profile: profile });
+    }, '确定');
   const sel = $('#mProfile');
-  if (sel) sel.selectedIndex = profileIdx;
+  if (sel) sel.selectedIndex = profileIdx + 1;
 }
 function confirmModal(text, onOk) {
   openModal('确认', '<div class="modal-hint">' + esc(text) + '</div>', onOk, '删除');
@@ -470,7 +479,7 @@ function updateHslEnabled() {
   });
   $('#hslReset').disabled = !on;
   $('#hslHint').textContent = on
-    ? '已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰（64³ 3D LUT 逐像素着色器）。'
+    ? '已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰。'
     : '提示：关闭 LUT 引擎后使用放大镜引擎，暂不支持分色系 HSL。';
 }
 function updatePerAppEnabled() {
@@ -503,7 +512,7 @@ function wireStaticControls() {
   }));
 
   const SWITCH_IDS = {
-    masterEnable: 'master', lutSwitch: 'lut',
+    masterEnable: 'master', lutSwitch: 'lut', vsyncSwitch: 'vsync',
     perAppSwitch: 'perapp',
     autoStartSwitch: 'autostart', autoTraySwitch: 'autotray', displayEnable: 'display',
   };
@@ -522,6 +531,7 @@ function wireStaticControls() {
     });
   };
   wire('masterEnable', 'master'); wire('lutSwitch', 'lut');
+  wire('vsyncSwitch', 'vsync');
   wire('perAppSwitch', 'perapp');
   wire('autoStartSwitch', 'autostart'); wire('autoTraySwitch', 'autotray');
   wire('displayEnable', 'displayEnabled');

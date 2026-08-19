@@ -3,6 +3,17 @@
 
 namespace hsf {
 
+// 进程名规范化：小写 + 去掉尾部 .exe 后缀。
+// ProcessNameOfPid 返回不带后缀的进程名（如 chrome），但 UI 提示用户输入
+// “进程名（如 chrome.exe）”，两者必须能互相匹配，否则按应用切换永远失配。
+static std::wstring NormalizeProc(const std::wstring& name)
+{
+    std::wstring s = ToLower(Trim(name));
+    if (s.size() > 4 && s.compare(s.size() - 4, 4, L".exe") == 0)
+        s.resize(s.size() - 4);
+    return s;
+}
+
 ForegroundAppWatcher::ForegroundAppWatcher() = default;
 
 ForegroundAppWatcher::~ForegroundAppWatcher()
@@ -65,7 +76,7 @@ void ForegroundAppWatcher::CheckNow()
             {
                 const auto& t = targets_[i];
                 if (t.ProcessName.empty()) continue;
-                if (!IEquals(proc, Trim(t.ProcessName))) continue;
+                if (!IEquals(NormalizeProc(proc), NormalizeProc(t.ProcessName))) continue;
                 if (!Trim(t.WindowTitle).empty() &&
                     ToLower(title).find(ToLower(Trim(t.WindowTitle))) == std::wstring::npos) continue;
                 hit = (int)i;
@@ -88,6 +99,12 @@ void ForegroundAppWatcher::CheckNow()
     {
         MatchChanged(hit, proc, title);
     }
+}
+
+int ForegroundAppWatcher::CurrentHit() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return currentHit_;
 }
 
 bool ForegroundAppWatcher::GetForegroundInfo(HWND hwnd, std::wstring& process, std::wstring& title)

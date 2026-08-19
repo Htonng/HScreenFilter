@@ -17,7 +17,7 @@ public:
     void SetTargets(const std::vector<AppBinding>& targets); // 复制目标列表（线程安全）
     void Start(int intervalMs = 500);
     void Stop();
-    int CurrentHit() const { return currentHit_; }
+    int CurrentHit() const; // 当前命中绑定索引或 -1（线程安全）
 
     // 供 UI 使用：获取当前前台窗口的进程名与标题
     static HWND GetForegroundWindowForPicker() { return GetForegroundWindow(); }
@@ -30,7 +30,7 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{ false };
     std::atomic<bool> stopRequested_{ false };
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
     int intervalMs_ = 500;
     std::vector<AppBinding> targets_; // 内部副本（SetTargets 时更新，受 mutex_ 保护）
