@@ -57,7 +57,10 @@ private:
 
     // 每显示器一个 LUT 引擎
     std::map<int, std::unique_ptr<LutEngine>> lutEngines_;
+    // 每显示器期望的垂直同步设置（引擎尚未创建时先记录，创建时套用）
+    std::map<int, bool> vsyncByDisplay_;
     bool capturable_ = false;
+    bool gammaSaturationWarned_ = false; // 伽马引擎下饱和度告警去重
 };
 
 } // namespace hsf

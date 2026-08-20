@@ -77,6 +77,7 @@ private:
     BackBufferRtv backBufferRtv_[3];
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> ps_;
+    ComPtr<ID3D11PixelShader> psPassthrough_;
     ComPtr<ID3D11ComputeShader> cs_;
     ComPtr<ID3D11InputLayout> inputLayout_;
     ComPtr<ID3D11RasterizerState> rasterizer_;

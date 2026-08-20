@@ -1,11 +1,14 @@
 # Changelog
 
-## v2.0.0-beta（发布预览版）
+## v2.0.0 (2026-08-20)
+- **代码审查修复（P1/P2/P3）**：FilterEngine 新建 LUT 引擎时套用 V-Sync 与「可被 OBS 捕获」亲和性；取消保存时回滚 V-Sync；
+  中性直通改为全屏三角形 + 直通着色器（兼容 HDR/格式变化）；profiles.json 原子写入；构建脚本用 Start-Process 取真实退出码；
+  开发钩子以 HSF_DEBUG 门控；伽马引擎饱和度告警去重。
 - **命名正式化**：发布版产物由 `webview2_demo2.exe` 更名为 `HScreenFilter.exe`；源码 `webview2_demo2.cpp`→`app_main.cpp`、
   `demo2.rc`→`release.rc`、构建脚本 `build-webview2-demo2.ps1`→`build-release.ps1`；日志 `webview2_demo2.log`→`HScreenFilter.log`；
   窗口类/托盘提示/MessageBox/预览图等统一去掉 demo/WebView2 字样。
-- **便捷版号标识**：`common.h` 新增 `kVersionString`（当前 `v2.0.0-beta`），窗口标题/托盘提示/日志头统一显示
-  `HScreenFilter v2.0.0-beta`，升级版本只改一处。
+- **便捷版号标识**：`version.h` 作为单一版本号来源（当前 `v2.0.0`），窗口标题/托盘提示/日志头统一显示
+  `HScreenFilter v2.0.0`，升级版本只改这一处。
 - **文案清理**：去掉滤镜引擎状态/引擎开关/HSL 提示等处的括号解释（如「LUT 逐像素引擎（3D LUT，支持 HSL 调色）」→「LUT 逐像素引擎」），
   功能板块标题「HSL 调色盘（3D LUT）」→「HSL 调色盘」。
 - **资源版本信息中文乱码修复**：rc 文件为 UTF-8，windres 显式 `--codepage=65001` 编译（此前中文在文件属性里乱码）。

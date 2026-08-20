@@ -46,6 +46,18 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 }
 )HLSL";
 
+// ---------------- 像素着色器：中性直通 ----------------
+// 直接采样输入纹理输出。与 CopyResource 相比不要求源纹理与后缓冲格式一致，
+// HDR/格式切换时也不会失败。
+const char* g_psPassthroughSource = R"HLSL(
+Texture2D InputTexture : register(t0);
+SamplerState InputSampler : register(s0);
+float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
+{
+    return InputTexture.Sample(InputSampler, uv);
+}
+)HLSL";
+
 // ---------------- 计算着色器：参数变化时重建 3D LUT ----------------
 // 与旧版逐像素 HSL 分色系着色器的数学完全一致（RGB→HSL 掩码 → OKLCH 调色 → 基础调节），
 // 区别在于只在参数变化时对 64^3 个格子点各算一次（GPU 并行，亚毫秒级），

@@ -50,8 +50,24 @@ $srcs = @(
 # Resource compilation (icon + version info); rc is UTF-8, set codepage explicitly
 # so Chinese version strings are not mangled in the resources.
 # Use Start-Process to get the real exit code ($LASTEXITCODE may be unset under -Command).
-$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', "$root\src\app.rc", '-O', 'coff', '-o', "$out\app_res.o") -Wait -NoNewWindow -PassThru
+$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', '-I', "$root\src", "$root\src\app.rc", '-O', 'coff', '-o', "$out\app_res.o") -Wait -NoNewWindow -PassThru
 if ($resProc.ExitCode -ne 0) { throw "windres failed (exit $($resProc.ExitCode))" }
+
+# 用 Start-Process 调用原生程序并取真实退出码（$LASTEXITCODE 在 -Command 调用下可能不更新）
+function Invoke-Native {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$LogPath
+    )
+    $errPath = "$LogPath.err"
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
+    if (Test-Path $LogPath) { Get-Content -LiteralPath $LogPath -Raw | Write-Host }
+    if (Test-Path $errPath) { Get-Content -LiteralPath $errPath -Raw | Write-Host }
+    Remove-Item -LiteralPath $LogPath, $errPath -Force -ErrorAction SilentlyContinue
+    return $p.ExitCode
+}
 
 # Compile flags (link-only flags like -mwindows are NOT used here)
 $commonFlags = @(
@@ -64,14 +80,15 @@ $commonFlags = @(
 
 Write-Host "Compiling $($srcs.Count) sources..."
 $objs = @()
+$i = 0
 foreach ($s in $srcs) {
     $obj = "$out\" + [IO.Path]::GetFileNameWithoutExtension($s) + ".o"
-    $output = & $clang @commonFlags -c $s -o $obj 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host $output
-        throw "compile failed: $s"
-    }
+    $compileArgs = $commonFlags + @('-c', $s, '-o', $obj)
+    $compileLog = "$out\compile-$i.log"
+    $exit = Invoke-Native $clang $compileArgs $compileLog
+    if ($exit -ne 0) { throw "compile failed: $s" }
     $objs += $obj
+    $i++
 }
 
 Write-Host "Linking..."
@@ -83,11 +100,10 @@ $linkFlags = @(
     "-loleaut32", "-luser32", "-lgdi32", "-ladvapi32", "-ldwmapi",
     "-static", "-static-libgcc", "-mwindows"
 )
-$output = & $clang @objs @linkFlags -o $exe 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host $output
-    throw "link failed"
-}
+$linkArgs = $objs + $linkFlags + @('-o', $exe)
+$linkLog = "$out\link.log"
+$exit = Invoke-Native $clang $linkArgs $linkLog
+if ($exit -ne 0) { throw "link failed" }
 
 # Ship the icon next to the exe (window/tray icon)
 New-Item -ItemType Directory -Force -Path "$out\assets" | Out-Null

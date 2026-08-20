@@ -1,4 +1,4 @@
-# HScreenFilter 屏幕滤镜 · v2.0.0-beta
+# HScreenFilter 屏幕滤镜 · v2.0.0
 
 **WebView2 桥接版**：C++17 滤镜引擎 + Flat Design 网页 UI（Edge WebView2 承载），
 滑块/开关实时驱动真实的滤镜引擎（3D LUT 逐像素 / 放大镜 / 伽马），数据与旧版完全兼容。
@@ -48,14 +48,14 @@
 
 ```powershell
 .\build.ps1                  # 主程序（C++ 原生版，输出 build\HScreenFilter.exe）
-.\build-release.ps1          # v2.0.0-beta 发布版（输出 dist\HScreenFilter-v2.0.0-beta\ + zip）
+.\build-release.ps1          # v2.0.0 发布版（输出 dist\HScreenFilter-v2.0.0\ + zip）
 ```
 
 ## 🚀 运行
 
 ```powershell
 .\build\HScreenFilter.exe --selftest   # 主程序自检
-dist\HScreenFilter-v2.0.0-beta\HScreenFilter.exe   # 发布版（需系统已装 WebView2 Runtime）
+dist\HScreenFilter-v2.0.0\HScreenFilter.exe   # 发布版（需系统已装 WebView2 Runtime）
 ```
 
 ## 📁 源码结构

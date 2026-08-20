@@ -148,7 +148,12 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
             }
             else
             {
+                // 引擎刚创建：把此前记录的 vsync/捕获亲和性立即套用，
+                // 避免首次启用/切换引擎时设置丢失。
+                auto vi = vsyncByDisplay_.find(displayIndex);
+                if (vi != vsyncByDisplay_.end()) eng->UseVsync = vi->second;
                 eng->Capturable = capturable_;
+                eng->ApplyOverlayAffinity();
                 engine = eng.get();
                 lutEngines_[displayIndex] = std::move(eng);
             }
@@ -166,11 +171,20 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
     }
     if (kind_ == EngineKind::GammaRamp)
     {
+        // 饱和度偏离中性时提示一次，恢复中性后再偏离才重新提示，避免拖动滑杆刷屏
         if (s.Saturation != 100.0)
         {
-            Log::Write(L"FilterEngine",
-                       L"注意：当前使用伽马曲线引擎，鲜艳度（饱和度）无法生效；"
-                       L"启用 LUT 引擎或改用放大镜引擎后鲜艳度才可用");
+            if (!gammaSaturationWarned_)
+            {
+                gammaSaturationWarned_ = true;
+                Log::Write(L"FilterEngine",
+                           L"注意：当前使用伽马曲线引擎，鲜艳度（饱和度）无法生效；"
+                           L"启用 LUT 引擎或改用放大镜引擎后鲜艳度才可用");
+            }
+        }
+        else
+        {
+            gammaSaturationWarned_ = false;
         }
         return GammaEngine::Apply(s);
     }
@@ -230,6 +244,8 @@ void FilterEngine::SetOverlayCapturable(bool capturable)
 void FilterEngine::SetVsync(int displayIndex, bool useVsync)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 先记录期望值：即使引擎尚未创建，后续 Apply 创建引擎时也能套用
+    vsyncByDisplay_[displayIndex] = useVsync;
     auto it = lutEngines_.find(displayIndex);
     if (it != lutEngines_.end() && it->second)
     {

@@ -50,10 +50,19 @@ void Store::Save(const ProfileData& data)
         JsonValue root = data.ToJson();
         std::wstring text = root.Serialize(true);
         std::string bytes = WideToUtf8(text);
-        FILE* f = _wfopen(file_.c_str(), L"wb");
+        // 先写临时文件再原子替换，避免进程崩溃/磁盘满时把 profiles.json 写坏
+        std::wstring tmp = file_ + L".tmp";
+        FILE* f = _wfopen(tmp.c_str(), L"wb");
         if (!f) return;
-        fwrite(bytes.data(), 1, bytes.size(), f);
+        bool ok = fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
         fclose(f);
+        if (!ok)
+        {
+            DeleteFileW(tmp.c_str());
+            return;
+        }
+        if (!MoveFileExW(tmp.c_str(), file_.c_str(), MOVEFILE_REPLACE_EXISTING))
+            DeleteFileW(tmp.c_str());
     }
     catch (...)
     {

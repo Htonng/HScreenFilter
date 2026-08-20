@@ -16,7 +16,7 @@ if (-not $tc -or -not (Test-Path "$tc\bin\clang++.exe")) { throw "llvm-mingw too
 
 $clang = "$tc\bin\clang++.exe"
 $windres = "$tc\bin\windres.exe"
-$out = Join-Path $root 'dist\HScreenFilter-v2.0.0-beta'
+$out = Join-Path $root 'dist\HScreenFilter-v2.0.0'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $srcs = @(
@@ -42,15 +42,33 @@ $links = @(
     "-static", "-static-libgcc"
 )
 
+# 用 Start-Process 调用原生程序并取真实退出码（$LASTEXITCODE 在 -Command 调用下可能不更新）
+function Invoke-Native {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$LogPath
+    )
+    $errPath = "$LogPath.err"
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
+    if (Test-Path $LogPath) { Get-Content -LiteralPath $LogPath -Raw | Write-Host }
+    if (Test-Path $errPath) { Get-Content -LiteralPath $errPath -Raw | Write-Host }
+    Remove-Item -LiteralPath $LogPath, $errPath -Force -ErrorAction SilentlyContinue
+    return $p.ExitCode
+}
+
 Write-Host "Compiling resource ..."
 # rc 为 UTF-8 编码，显式指定代码页，否则中文版本信息在资源里乱码。
 # 用 Start-Process 拿退出码（$LASTEXITCODE 在 -Command 调用脚本时可能不被设置）
-$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', "$root\src\release.rc", '-O', 'coff', '-o', "$root\build\release_res.o") -Wait -NoNewWindow -PassThru
+$resProc = Start-Process -FilePath $windres -ArgumentList @('--codepage=65001', '-I', "$root\src", "$root\src\release.rc", '-O', 'coff', '-o', "$root\build\release_res.o") -Wait -NoNewWindow -PassThru
 if ($resProc.ExitCode -ne 0) { throw "windres failed (exit $($resProc.ExitCode))" }
 
 Write-Host "Compiling $($srcs.Count) sources ..."
-& $clang "$root\build\release_res.o" @flags @srcs @links -o "$out\HScreenFilter.exe" 2>&1
-if ($LASTEXITCODE -ne 0) { throw "compile failed" }
+$compileArgs = @("$root\build\release_res.o") + $flags + $srcs + $links + @('-o', "$out\HScreenFilter.exe")
+$compileLog = Join-Path $root 'build\release-compile.log'
+$exit = Invoke-Native $clang $compileArgs $compileLog
+if ($exit -ne 0) { throw "compile failed (exit $exit)" }
 
 Copy-Item "$root\tools\webview2\x64\WebView2Loader.dll" "$out\WebView2Loader.dll" -Force
 $dstWeb = Join-Path $out 'webui2'
@@ -61,7 +79,7 @@ Copy-Item "$root\webui2" $dstWeb -Recurse -Force
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match 'webview2_demo2|\.log$|preview\.png$' } | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # 打包发布 zip
-$zip = Join-Path $root 'dist\HScreenFilter-v2.0.0-beta.zip'
+$zip = Join-Path $root 'dist\HScreenFilter-v2.0.0.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
 
@@ -69,4 +87,4 @@ Write-Host ""
 Write-Host "Build OK: $out\HScreenFilter.exe"
 Write-Host "Run:      $out\HScreenFilter.exe"
 Write-Host "Package:  $zip"
-Write-Host "Version:  v2.0.0-beta"
+Write-Host "Version:  v2.0.0"

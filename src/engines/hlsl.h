@@ -17,6 +17,8 @@ constexpr int kLutSize = 64;
 
 // 像素着色器（LUT 采样 + 屏幕空间抖动）
 extern const char* g_psLutSource;
+// 像素着色器（中性直通：仅采样输入纹理，用于格式无关的透明直通）
+extern const char* g_psPassthroughSource;
 // 顶点着色器（全屏三角形）
 extern const char* g_vsSource;
 // 计算着色器（参数变化时重建 LUT）

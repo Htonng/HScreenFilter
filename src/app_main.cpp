@@ -835,8 +835,10 @@ static void HandleMessage(JsonValue &msg)
     {
         Log(L"[web] ready w=%d h=%d", (int)msg.GetNumber(L"w", 0), (int)msg.GetNumber(L"h", 0));
         SendState(L"init");
+#ifdef HSF_DEBUG
         SetTimer(g_hwnd, 1, 2500, nullptr);
         SetTimer(g_hwnd, 2, 5000, nullptr);
+#endif
         return;
     }
     if (type == L"applied")
@@ -1030,6 +1032,8 @@ static void HandleMessage(JsonValue &msg)
             if (ai >= 0 && ai < (int)data_.Profiles.size()) data_.Profiles[ai].UseDxgi = savedUseDxgi_;
             ApplyLutMode(savedUseDxgi_);
         }
+        // 垂直同步同样回滚（否则取消后开关不还原、IsDirty 仍为 true）
+        CurDisplay().UseVsync = savedUseVsync_;
         ApplyCurrent();
         SendDirtyState();
         SendState(L"sync");
@@ -1045,6 +1049,7 @@ static void HandleMessage(JsonValue &msg)
 
 
 // ---- 开发测试钩子：读取 exe 目录 app-test.json 并按序喂给 HandleMessage ----
+#ifdef HSF_DEBUG
 static void RunTestScript()
 {
     FILE *f = _wfopen((ExeDir() + L"\\app-test.json").c_str(), L"rb");
@@ -1059,6 +1064,7 @@ static void RunTestScript()
     for (auto &m : root.arr) HandleMessage(m);
     Log(L"[test] done");
 }
+#endif // HSF_DEBUG
 
 // ---------------------------------------------------------------------------
 // COM 回调
@@ -1111,6 +1117,7 @@ public:
     }
 };
 
+#ifdef HSF_DEBUG
 class PreviewDoneHandler : public ICoreWebView2CapturePreviewCompletedHandler
 {
 public:
@@ -1140,6 +1147,7 @@ static void SavePreview()
     g_webview->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream, new PreviewDoneHandler());
     stream->Release();
 }
+#endif // HSF_DEBUG
 
 class ControllerCreatedHandler : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler
 {
@@ -1246,8 +1254,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else ResizeWebView();
         return 0;
     case WM_TIMER:
+#ifdef HSF_DEBUG
         if (wp == 1) { KillTimer(hwnd, 1); SavePreview(); }
         else if (wp == 2) { KillTimer(hwnd, 2); RunTestScript(); }
+#endif
         return 0;
     case WM_GETMINMAXINFO:
     {
@@ -1294,8 +1304,10 @@ static void ResolveWebUi(std::wstring &outPath, std::wstring &outUrl)
 {
     std::wstring cand = ExeDir() + L"\\webui2\\index.html";
     if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) { outPath = cand; outUrl = ToFileUrl(cand); return; }
+#ifdef HSF_DEBUG
     cand = L"F:\\code\\HScreenFilter\\webui2\\index.html";
     if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) { outPath = cand; outUrl = ToFileUrl(cand); return; }
+#endif
     outPath = L"<not found>"; outUrl = L"about:blank";
 }
 

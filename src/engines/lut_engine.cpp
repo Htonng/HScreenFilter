@@ -209,6 +209,13 @@ bool LutEngine::CreatePipeline()
                                           ps_.GetAddressOf())))
         return false;
 
+    // 像素着色器（中性直通）
+    ComPtr<ID3DBlob> psPassBlob;
+    if (!CompileShader(g_psPassthroughSource, "main", "ps_4_0", psPassBlob, LastError)) return false;
+    if (FAILED(device_->CreatePixelShader(psPassBlob->GetBufferPointer(), psPassBlob->GetBufferSize(), nullptr,
+                                          psPassthrough_.GetAddressOf())))
+        return false;
+
     // 计算着色器（LUT 重建）
     ComPtr<ID3DBlob> csBlob;
     if (!CompileShader(g_csLutSource, "CSMain", "cs_5_0", csBlob, LastError)) return false;
@@ -555,8 +562,23 @@ void LutEngine::DrawAndPresent()
 
     if (neutral_.load())
     {
-        // 中性直通：不采样 LUT，直接拷贝捕获帧
-        context_->CopyResource(backBufferTex_.Get(), frameTexture_.Get());
+        // 中性直通：走全屏三角形 + 直通像素着色器。
+        // 不直接 CopyResource，因为捕获帧与后缓冲格式可能不一致（HDR/格式切换）。
+        const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
+        context_->ClearRenderTargetView(rtv, clearColor);
+        context_->OMSetRenderTargets(1, &rtv, nullptr);
+        D3D11_VIEWPORT vp{ 0, 0, (float)width_, (float)height_, 0, 1 };
+        context_->RSSetViewports(1, &vp);
+        context_->RSSetState(rasterizer_.Get());
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->IASetInputLayout(inputLayout_.Get());
+        UINT stride = 24, offset = 0;
+        context_->IASetVertexBuffers(0, 1, vertexBuffer_.GetAddressOf(), &stride, &offset);
+        context_->VSSetShader(vs_.Get(), nullptr, 0);
+        context_->PSSetShader(psPassthrough_.Get(), nullptr, 0);
+        context_->PSSetShaderResources(0, 1, frameSrv_.GetAddressOf());
+        context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
+        context_->Draw(3, 0);
     }
     else
     {
@@ -658,6 +680,7 @@ void LutEngine::ReleaseAll()
     rasterizer_.Reset();
     inputLayout_.Reset();
     ps_.Reset();
+    psPassthrough_.Reset();
     vs_.Reset();
     cs_.Reset();
     inputSampler_.Reset();
