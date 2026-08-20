@@ -226,6 +226,17 @@ static void ApplyCurrent()
         if (pi >= 0 && pi < (int)data_.Profiles.size())
             perAppProfile = &data_.Profiles[pi];
     }
+
+    // 按应用命中某个配置时，引擎模式跟随该配置的 UseDxgi；未命中/「按当前设置」
+    // 时回到 data_.UseDxgi。这里只切换引擎层，不改动 data_.UseDxgi，避免自动切换
+    // 污染保存的“当前设置”模式（例如：手动当前是放大镜，绑定的配置却是 LUT）。
+    bool dxgiNow = perAppProfile ? perAppProfile->UseDxgi : data_.UseDxgi;
+    if (FilterEngine::Instance().UseDxgi() != dxgiNow)
+    {
+        FilterEngine::Instance().SetUseDxgi(dxgiNow);
+        FilterEngine::Instance().Initialize();
+    }
+
     bool anyEnabled = false, anyOk = false;
     for (int i = 0; i < (int)monitors_.size() && i < (int)data_.Displays.size(); i++)
     {
@@ -234,14 +245,14 @@ static void ApplyCurrent()
         if (!on) { FilterEngine::Instance().ResetDisplay(i); continue; }
         anyEnabled = true;
         FilterSettings s = perAppProfile ? perAppProfile->Settings
-                                         : (data_.UseDxgi ? d.Current : NeutralizeHsl(d.Current));
-        if (data_.UseDxgi) FilterEngine::Instance().SetVsync(i, d.UseVsync);
+                                         : (dxgiNow ? d.Current : NeutralizeHsl(d.Current));
+        if (dxgiNow) FilterEngine::Instance().SetVsync(i, d.UseVsync);
         if (FilterEngine::Instance().Apply(i, monitors_[i], s)) anyOk = true;
         else Log(L"[engine] apply FAILED display %d: %s", i, FilterEngine::Instance().LastError().c_str());
     }
     if (!anyEnabled) FilterEngine::Instance().Reset();
     Log(L"[engine] apply done kind=%d useDxgi=%d anyEnabled=%d anyOk=%d",
-        (int)FilterEngine::Instance().Kind(), data_.UseDxgi ? 1 : 0, anyEnabled ? 1 : 0, anyOk ? 1 : 0);
+        (int)FilterEngine::Instance().Kind(), dxgiNow ? 1 : 0, anyEnabled ? 1 : 0, anyOk ? 1 : 0);
 }
 
 static void ApplyLutMode(bool useLut)
