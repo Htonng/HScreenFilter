@@ -2,12 +2,27 @@
 #include "hlsl.h"
 #include "log.h"
 #include <dxgi.h>
+#include <dxgi1_6.h>
 
 namespace hsf {
 
 static constexpr uint32_t kDxgiErrorWaitTimeout = 0x887A0027;
 static constexpr uint32_t kDxgiErrorAccessLost = 0x887A0026;
 static constexpr uint32_t kDxgiErrorNotCurrentlyAvailable = 0x887A0021;
+
+// HDR 显示器上 SDR flip 覆盖层会被 DWM 逐帧做 SDR↔HDR 转换，常见表现为全屏闪烁。
+// 检测到 HDR 输出时 LUT 覆盖层回退（放大镜/伽马引擎不受影响），避免闪烁。
+static bool IsHdrOutput(IDXGIOutput* output)
+{
+    if (!output) return false;
+    ComPtr<IDXGIOutput6> o6;
+    if (FAILED(output->QueryInterface(IID_PPV_ARGS(o6.GetAddressOf())))) return false;
+    DXGI_OUTPUT_DESC1 desc1{};
+    if (FAILED(o6->GetDesc1(&desc1))) return false;
+    // HDR10（PQ/2020）与 scRGB（Windows 高级颜色）都按 HDR 处理
+    return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
+           desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+}
 
 // 调色强度系数（与旧版一致：只减半“相对中性值”的偏差，不改动用户保存的参数）
 static constexpr double kAdjustStrength = 0.75;
@@ -55,6 +70,18 @@ bool LutEngine::Start(int x, int y, int width, int height, int outputIndex)
     try
     {
         if (!CreateDevice()) return false;
+
+        // HDR 显示器：SDR 覆盖层会造成全屏闪烁，直接回退（FilterEngine 会转用放大镜/伽马引擎）
+        {
+            ComPtr<IDXGIAdapter> hdrAdapter;
+            ComPtr<IDXGIOutput> hdrOutput;
+            if (FindOutput(hdrAdapter, hdrOutput) && IsHdrOutput(hdrOutput.Get()))
+            {
+                LastError = L"HDR 显示器暂不支持 LUT 覆盖层（全屏闪烁），已回退到放大镜/伽马引擎";
+                Log::Write(L"LutEngine", LastError.c_str());
+                return false;
+            }
+        }
 
         CreateOverlayWindow();
         if (!hwnd_) return false;
@@ -496,6 +523,13 @@ void LutEngine::RenderLoop()
         {
             // 桌面模式/分辨率变化：重建捕获后继续
             if (!RecoverCapture()) break;
+            // 运行期切到 HDR：SDR 覆盖层会闪烁，停止本引擎让上层回退
+            if (output_ && IsHdrOutput(output_.Get()))
+            {
+                LastError = L"显示器切换为 HDR，SDR 覆盖层会闪烁，停止 LUT 引擎（下次应用时回退）";
+                Log::Write(L"LutEngine", LastError.c_str());
+                break;
+            }
         }
         else
         {
