@@ -10,20 +10,6 @@ static constexpr uint32_t kDxgiErrorWaitTimeout = 0x887A0027;
 static constexpr uint32_t kDxgiErrorAccessLost = 0x887A0026;
 static constexpr uint32_t kDxgiErrorNotCurrentlyAvailable = 0x887A0021;
 
-// HDR 显示器上 SDR flip 覆盖层会被 DWM 逐帧做 SDR↔HDR 转换，常见表现为全屏闪烁。
-// 检测到 HDR 输出时 LUT 覆盖层回退（放大镜/伽马引擎不受影响），避免闪烁。
-static bool IsHdrOutput(IDXGIOutput* output)
-{
-    if (!output) return false;
-    ComPtr<IDXGIOutput6> o6;
-    if (FAILED(output->QueryInterface(IID_PPV_ARGS(o6.GetAddressOf())))) return false;
-    DXGI_OUTPUT_DESC1 desc1{};
-    if (FAILED(o6->GetDesc1(&desc1))) return false;
-    // HDR10（PQ/2020）与 scRGB（Windows 高级颜色）都按 HDR 处理
-    return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
-           desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
-}
-
 // 调色强度系数（与旧版一致：只减半“相对中性值”的偏差，不改动用户保存的参数）
 static constexpr double kAdjustStrength = 0.75;
 
@@ -71,17 +57,9 @@ bool LutEngine::Start(int x, int y, int width, int height, int outputIndex)
     {
         if (!CreateDevice()) return false;
 
-        // HDR 显示器：SDR 覆盖层会造成全屏闪烁，直接回退（FilterEngine 会转用放大镜/伽马引擎）
-        {
-            ComPtr<IDXGIAdapter> hdrAdapter;
-            ComPtr<IDXGIOutput> hdrOutput;
-            if (FindOutput(hdrAdapter, hdrOutput) && IsHdrOutput(hdrOutput.Get()))
-            {
-                LastError = L"HDR 显示器暂不支持 LUT 覆盖层（全屏闪烁），已回退到放大镜/伽马引擎";
-                Log::Write(L"LutEngine", LastError.c_str());
-                return false;
-            }
-        }
+        // 探测输出色彩空间并选择匹配的交换链格式（SDR / HDR10 PQ / scRGB）
+        DetectColorSpace();
+        Log::WriteFmt(L"LutEngine", L"输出色彩空间模式=%d (0 SDR / 1 HDR10 / 2 scRGB)", colorMode_);
 
         CreateOverlayWindow();
         if (!hwnd_) return false;
@@ -188,7 +166,7 @@ void LutEngine::CreateSwapChain()
     DXGI_SWAP_CHAIN_DESC1 desc{};
     desc.Width = (UINT)width_;
     desc.Height = (UINT)height_;
-    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Format = swapChainFormat_;
     desc.Stereo = FALSE;
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -216,6 +194,11 @@ void LutEngine::CreateSwapChain()
         return;
     }
     factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
+
+    // 声明交换链色彩空间（HDR10 PQ 或 scRGB），DWM 据此正确合成
+    ComPtr<IDXGISwapChain3> sc3;
+    if (SUCCEEDED(swapChain_->QueryInterface(IID_PPV_ARGS(sc3.GetAddressOf()))))
+        sc3->SetColorSpace1(colorSpace_);
 }
 
 // ---------------- 渲染管线 ----------------
@@ -286,6 +269,14 @@ bool LutEngine::CreatePipeline()
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(device_->CreateBuffer(&cbDesc, nullptr, paramsBuffer_.GetAddressOf()))) return false;
 
+    // 像素着色器色彩空间常量缓冲（b1：输入/输出模式 + padding）
+    D3D11_BUFFER_DESC modeDesc{};
+    modeDesc.ByteWidth = 16;
+    modeDesc.Usage = D3D11_USAGE_DEFAULT;
+    modeDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(device_->CreateBuffer(&modeDesc, nullptr, psModeBuffer_.GetAddressOf()))) return false;
+    UpdateColorModeBuffer();
+
     // 帧纹理（GPU 内拷贝目标）+ SRV
     D3D11_TEXTURE2D_DESC texDesc{};
     texDesc.Width = (UINT)width_;
@@ -350,6 +341,42 @@ bool LutEngine::FindOutput(ComPtr<IDXGIAdapter>& adapter, ComPtr<IDXGIOutput>& o
         }
     }
     return false;
+}
+
+void LutEngine::DetectColorSpace()
+{
+    colorMode_ = 0;
+    swapChainFormat_ = DXGI_FORMAT_B8G8R8A8_UNORM;
+    colorSpace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIOutput> output;
+    if (!FindOutput(adapter, output)) return;
+    ComPtr<IDXGIOutput6> o6;
+    DXGI_OUTPUT_DESC1 desc1{};
+    if (FAILED(output->QueryInterface(IID_PPV_ARGS(o6.GetAddressOf()))) ||
+        FAILED(o6->GetDesc1(&desc1)))
+        return;
+
+    colorSpace_ = desc1.ColorSpace;
+    if (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+    {
+        colorMode_ = 1;
+        swapChainFormat_ = DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
+    else if (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+    {
+        colorMode_ = 2;
+        swapChainFormat_ = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+}
+
+void LutEngine::UpdateColorModeBuffer()
+{
+    if (!psModeBuffer_ || !context_) return;
+    struct { uint32_t inputMode; uint32_t outputMode; float pad[2]; } data =
+    { (uint32_t)inputMode_, (uint32_t)colorMode_, { 0.0f, 0.0f } };
+    context_->UpdateSubresource(psModeBuffer_.Get(), 0, nullptr, &data, 0, 0);
 }
 
 bool LutEngine::CreateDevice()
@@ -460,7 +487,7 @@ void LutEngine::EnsureSwapChainSize(UINT w, UINT h)
     backBufferTex_.Reset();
     for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
     if (swapChain_)
-        swapChain_->ResizeBuffers(2, w, h, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        swapChain_->ResizeBuffers(2, w, h, swapChainFormat_, 0);
     if (hwnd_)
         SetWindowPos(hwnd_, HWND_TOPMOST, x_, y_, (int)w, (int)h,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -490,6 +517,19 @@ void LutEngine::RenderLoop()
                     tex->GetDesc(&d);
                     EnsureSwapChainSize(d.Width, d.Height);
                     EnsureFrameTexture(tex);
+
+                    // 输入模式按捕获纹理格式判定（与输出模式相互独立）
+                    int newInputMode = 0;
+                    if (d.Format == DXGI_FORMAT_R10G10B10A2_UNORM) newInputMode = 1;
+                    else if (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) newInputMode = 2;
+                    if (newInputMode != inputMode_)
+                    {
+                        inputMode_ = newInputMode;
+                        UpdateColorModeBuffer();
+                        Log::WriteFmt(L"LutEngine", L"捕获格式=%d 输入模式=%d 输出模式=%d",
+                                      (int)d.Format, inputMode_, colorMode_);
+                    }
+
                     // GPU 内拷贝：捕获帧 → 渲染纹理（无 CPU 往返）。
                     // 中性参数也照常拷贝+呈现（直通），否则 flip 交换链的覆盖层
                     // 内容会卡在旧帧。
@@ -523,10 +563,13 @@ void LutEngine::RenderLoop()
         {
             // 桌面模式/分辨率变化：重建捕获后继续
             if (!RecoverCapture()) break;
-            // 运行期切到 HDR：SDR 覆盖层会闪烁，停止本引擎让上层回退
-            if (output_ && IsHdrOutput(output_.Get()))
+            // 若输出色彩空间变化（SDR/HDR 切换），交换链格式不再匹配，
+            // 停止本引擎，让上层在下次应用时按新色彩空间重建。
+            int oldMode = colorMode_;
+            DetectColorSpace();
+            if (colorMode_ != oldMode)
             {
-                LastError = L"显示器切换为 HDR，SDR 覆盖层会闪烁，停止 LUT 引擎（下次应用时回退）";
+                LastError = L"显示器色彩空间发生变化，停止 LUT 引擎（下次应用时重建）";
                 Log::Write(L"LutEngine", LastError.c_str());
                 break;
             }
@@ -610,6 +653,7 @@ void LutEngine::DrawAndPresent()
         context_->IASetVertexBuffers(0, 1, vertexBuffer_.GetAddressOf(), &stride, &offset);
         context_->VSSetShader(vs_.Get(), nullptr, 0);
         context_->PSSetShader(psPassthrough_.Get(), nullptr, 0);
+        context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
         context_->PSSetShaderResources(0, 1, frameSrv_.GetAddressOf());
         context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
         context_->Draw(3, 0);
@@ -628,6 +672,7 @@ void LutEngine::DrawAndPresent()
         context_->IASetVertexBuffers(0, 1, vertexBuffer_.GetAddressOf(), &stride, &offset);
         context_->VSSetShader(vs_.Get(), nullptr, 0);
         context_->PSSetShader(ps_.Get(), nullptr, 0);
+        context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
         context_->PSSetShaderResources(0, 1, frameSrv_.GetAddressOf());
         context_->PSSetShaderResources(1, 1, lutSrv_.GetAddressOf());
         context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
@@ -671,6 +716,12 @@ void LutEngine::RenderSelfCheck()
     // 从 back buffer 读回中心像素，黑屏时记录日志
     // 中性参数时覆盖层可能从未呈现过（backBufferTex_ 为空），直接跳过
     if (!backBufferTex_) return;
+    // HDR 后缓冲是 10bit/float，不再按 4 字节 BGRA 假设做自检
+    if (colorMode_ != 0)
+    {
+        Log::WriteFmt(L"LutEngine", L"渲染自检跳过（HDR 输出模式 %d）", colorMode_);
+        return;
+    }
     try
     {
         ComPtr<ID3D11Texture2D> staging;
@@ -710,6 +761,7 @@ void LutEngine::ReleaseAll()
     frameSrv_.Reset();
     frameTexture_.Reset();
     paramsBuffer_.Reset();
+    psModeBuffer_.Reset();
     vertexBuffer_.Reset();
     rasterizer_.Reset();
     inputLayout_.Reset();

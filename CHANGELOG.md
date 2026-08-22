@@ -4,9 +4,8 @@
 - **按应用切换配置引擎不生效**：命中绑定的配置时只应用了该配置的滤镜参数，未同步切换其 UseDxgi 引擎模式；
   手动当前为放大镜、绑定配置为 LUT 时，自动切换后 LUT 引擎不会启用、滤镜失效。
   `ApplyCurrent` 现在按命中配置的 UseDxgi 切换引擎层（不改动保存的 `data_.UseDxgi`），未命中时恢复手动模式。
-- **HDR 显示器下 LUT 引擎全屏闪烁**：SDR flip 覆盖层在 HDR 输出上会被 DWM 逐帧做 SDR↔HDR 转换，表现为全屏闪烁。
-  `LutEngine::Start` 现在用 `IDXGIOutput6::GetDesc1` 检测 HDR（HDR10 PQ/2020 与 scRGB），检测到即回退到放大镜/伽马引擎；
-  运行期切换到 HDR 时也会停止 LUT 引擎并在下次应用时回退。
+- **HDR 显示器下 LUT 引擎全屏闪烁/过亮**：改用与输出色彩空间匹配的交换链（HDR10=R10G10B10A2+PQ、scRGB=R16G16B16A16_FLOAT）并 `SetColorSpace1` 声明；
+  输入模式按捕获纹理格式判定、输出模式按交换链色彩空间判定，二者独立，LUT 前后做 PQ/scRGB↔sRGB 转换并带 SDR 白点缩放；运行期色彩空间变化时下次应用重建。
 
 ## v2.0.0 (2026-08-20)
 - **代码审查修复（P1/P2/P3）**：FilterEngine 新建 LUT 引擎时套用 V-Sync 与「可被 OBS 捕获」亲和性；取消保存时回滚 V-Sync；

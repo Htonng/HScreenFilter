@@ -13,6 +13,7 @@
 #include "hlsl.h"
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_6.h>
 
 namespace hsf {
 
@@ -53,6 +54,10 @@ private:
     // 按显示器坐标（而非索引）查找 DXGI 输出：EnumDisplayMonitors 顺序与
     // EnumOutputs 顺序不一定一致，多显示器时按索引可能捕获到错误的屏幕
     bool FindOutput(ComPtr<IDXGIAdapter>& adapter, ComPtr<IDXGIOutput>& output);
+    // 探测目标输出色彩空间并选择匹配的交换链格式（SDR / HDR10 PQ / scRGB）
+    void DetectColorSpace();
+    // 输入/输出色彩空间模式变化时更新 b1 常量缓冲
+    void UpdateColorModeBuffer();
     void CreateCapture();
     // 取得当前后缓冲对应的 RTV。flip 模型交换链的后缓冲每帧在多个缓冲间轮转，
     // 单槽缓存会退化为每帧重建 RTV（4060 等卡顿的元凶之一），这里按缓冲身份缓存。
@@ -83,6 +88,7 @@ private:
     ComPtr<ID3D11RasterizerState> rasterizer_;
     ComPtr<ID3D11Buffer> vertexBuffer_;
     ComPtr<ID3D11Buffer> paramsBuffer_;
+    ComPtr<ID3D11Buffer> psModeBuffer_;   // 像素着色器色彩空间模式（b1）
     ComPtr<ID3D11Texture2D> frameTexture_;
     ComPtr<ID3D11ShaderResourceView> frameSrv_;
     ComPtr<ID3D11Texture2D> backBufferTex_;   // 当前后缓冲（渲染自检读回用）
@@ -94,6 +100,12 @@ private:
     ComPtr<IDXGIOutputDuplication> duplication_;
     ComPtr<IDXGIAdapter> adapter_;
     ComPtr<IDXGIOutput> output_;
+
+    // 色彩空间/交换链格式（HDR 兼容）
+    DXGI_FORMAT swapChainFormat_ = DXGI_FORMAT_B8G8R8A8_UNORM;
+    DXGI_COLOR_SPACE_TYPE colorSpace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    int colorMode_ = 0;   // 输出模式：0 SDR / 1 HDR10(PQ) / 2 scRGB
+    int inputMode_ = 0;   // 输入模式：按捕获纹理格式判定
 
     // 自检只做一次（原来每 30 帧整屏读回 → GPU 停顿 → 卡顿）
     bool selfChecked_ = false;

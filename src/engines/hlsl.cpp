@@ -11,50 +11,193 @@ VSOutput main(VSInput i) { VSOutput o; o.pos = i.pos; o.uv = i.uv; return o; }
 )HLSL";
 
 // ---------------- 像素着色器：LUT 采样 + 屏幕空间抖动 ----------------
-// 输入 sRGB → 3D LUT 三线性采样 → 输出 sRGB。
-// 抖动在屏幕空间进行（确定性伪随机，同一像素每帧一致）。
+// 输入先转到 sRGB 工作空间做 LUT，再转到输出色彩空间。
+// InputMode / OutputMode：0 sRGB / 1 HDR10 PQ / 2 scRGB 线性。
+// 转换带 SDR 白点缩放（scRGB 1.0 = 80nit；HDR10 PQ 满量程 = 10000nit）。
 const char* g_psLutSource = R"HLSL(
 Texture2D InputTexture : register(t0);
 SamplerState InputSampler : register(s0);
 Texture3D LutTexture : register(t1);
 SamplerState LutSampler : register(s1);
 
+cbuffer ColorSpace : register(b1)
+{
+    uint InputMode;
+    uint OutputMode;
+    float2 Pad;
+};
+
 static const float LUT_N = 64.0;
+static const float SDR_TO_HDR = 80.0 / 10000.0;
 
 float DitherNoise(float2 p)
 {
     return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
 }
 
+float3 SrgbToLinear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+    return lerp(lo, hi, step(0.04045, c));
+}
+
+float3 LinearToSrgb(float3 c)
+{
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, c));
+}
+
+float3 PqToLinear(float3 pq)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    pq = max(pq, 0.0);
+    float3 p = pow(max(pq, 1e-8), 1.0 / m2);
+    float3 num = max(p - c1, 0.0);
+    float3 den = c2 - c3 * p;
+    return pow(num / max(den, 1e-8), 1.0 / m1);
+}
+
+float3 LinearToPq(float3 lin)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    lin = max(lin, 0.0);
+    float3 y = pow(max(lin, 1e-8), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float3 InputToSrgbWorking(float3 c)
+{
+    if (InputMode == 1)
+    {
+        float3 lin10000 = PqToLinear(saturate(c));
+        float3 lin80 = lin10000 / SDR_TO_HDR;
+        return LinearToSrgb(saturate(lin80));
+    }
+    if (InputMode == 2)
+        return LinearToSrgb(saturate(c));
+    return saturate(c);
+}
+
+float3 SrgbWorkingToOutput(float3 srgb)
+{
+    if (OutputMode == 1)
+        return LinearToPq(SrgbToLinear(saturate(srgb)) * SDR_TO_HDR);
+    if (OutputMode == 2)
+        return SrgbToLinear(saturate(srgb));
+    return srgb;
+}
+
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 {
     float4 color = InputTexture.Sample(InputSampler, uv);
+    float3 rgb = InputToSrgbWorking(color.rgb);
 
     // 把 sRGB 值映射到 LUT 纹理坐标：texel i 代表值 i/(N-1)
-    float3 u = (color.rgb * (LUT_N - 1.0) + 0.5) / LUT_N;
-    float3 rgb = LutTexture.Sample(LutSampler, u).rgb;
+    float3 u = (rgb * (LUT_N - 1.0) + 0.5) / LUT_N;
+    float3 outRgb = LutTexture.Sample(LutSampler, u).rgb;
 
-    // 抖动：±1.2/255 确定性噪声，打散 8-bit 量化在平滑渐变/掩码过渡区产生的色带
-    float2 sp = pos.xy;
-    float3 dither = float3(
-        DitherNoise(sp),
-        DitherNoise(sp + float2(7.1, 3.3)),
-        DitherNoise(sp + float2(11.7, 5.9))) * (2.4 / 255.0) - (1.2 / 255.0);
-    rgb = saturate(rgb + dither);
+    // 仅 SDR 下抖动；HDR PQ/scRGB 空间抖动会在量化处丢失
+    if (OutputMode == 0)
+    {
+        float2 sp = pos.xy;
+        float3 dither = float3(
+            DitherNoise(sp),
+            DitherNoise(sp + float2(7.1, 3.3)),
+            DitherNoise(sp + float2(11.7, 5.9))) * (2.4 / 255.0) - (1.2 / 255.0);
+        outRgb = saturate(outRgb + dither);
+    }
 
-    return float4(rgb, 1.0);
+    return float4(SrgbWorkingToOutput(outRgb), 1.0);
 }
 )HLSL";
 
 // ---------------- 像素着色器：中性直通 ----------------
-// 直接采样输入纹理输出。与 CopyResource 相比不要求源纹理与后缓冲格式一致，
-// HDR/格式切换时也不会失败。
+// 直接采样输入纹理并转到输出色彩空间（保留 HDR 高光，不做 LUT）。
 const char* g_psPassthroughSource = R"HLSL(
 Texture2D InputTexture : register(t0);
 SamplerState InputSampler : register(s0);
+
+cbuffer ColorSpace : register(b1)
+{
+    uint InputMode;
+    uint OutputMode;
+    float2 Pad;
+};
+
+static const float SDR_TO_HDR = 80.0 / 10000.0;
+
+float3 SrgbToLinear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+    return lerp(lo, hi, step(0.04045, c));
+}
+
+float3 LinearToSrgb(float3 c)
+{
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, c));
+}
+
+float3 PqToLinear(float3 pq)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    pq = max(pq, 0.0);
+    float3 p = pow(max(pq, 1e-8), 1.0 / m2);
+    float3 num = max(p - c1, 0.0);
+    float3 den = c2 - c3 * p;
+    return pow(num / max(den, 1e-8), 1.0 / m1);
+}
+
+float3 LinearToPq(float3 lin)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    lin = max(lin, 0.0);
+    float3 y = pow(max(lin, 1e-8), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float3 InputToLinear(float3 c)
+{
+    if (InputMode == 1)
+        return PqToLinear(saturate(c)) / SDR_TO_HDR; // 80nit 量纲
+    if (InputMode == 2)
+        return c;                                     // 已是 80nit 量纲线性
+    return SrgbToLinear(saturate(c));
+}
+
+float3 LinearToOutput(float3 lin)
+{
+    if (OutputMode == 1)
+        return LinearToPq(max(lin, 0.0) * SDR_TO_HDR);
+    if (OutputMode == 2)
+        return lin;
+    return LinearToSrgb(saturate(lin));
+}
+
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 {
-    return InputTexture.Sample(InputSampler, uv);
+    float3 c = InputTexture.Sample(InputSampler, uv).rgb;
+    return float4(LinearToOutput(InputToLinear(c)), 1.0);
 }
 )HLSL";
 
