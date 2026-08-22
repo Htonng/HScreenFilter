@@ -439,7 +439,19 @@ void LutEngine::CreateCapture()
         LastError = L"IDXGIOutput1 不可用";
         return;
     }
-    HRESULT hr = output1->DuplicateOutput(device_.Get(), duplication_.GetAddressOf());
+    // 固定捕获格式为 B8G8R8A8，避免 HDR 下 DuplicateOutput 在 scRGB float 与 BGRA8
+    // 之间逐帧切换（导致黑条闪烁与色彩抖动）。DuplicateOutput1 支持指定格式。
+    HRESULT hr = E_FAIL;
+    ComPtr<IDXGIOutput5> output5;
+    if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(output5.GetAddressOf()))))
+    {
+        DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+        hr = output5->DuplicateOutput1(device_.Get(), 0, 1, &fmt, duplication_.GetAddressOf());
+        if (SUCCEEDED(hr))
+            Log::Write(L"LutEngine", L"DuplicateOutput1 固定捕获格式 B8G8R8A8");
+    }
+    if (FAILED(hr))
+        hr = output1->DuplicateOutput(device_.Get(), duplication_.GetAddressOf());
     // 启动瞬间显卡可能暂时不可用（显示器刚切换/驱动忙），短暂重试几次
     for (int attempt = 0; FAILED(hr) && attempt < 3; attempt++)
     {
