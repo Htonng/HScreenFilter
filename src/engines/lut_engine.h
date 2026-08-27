@@ -64,6 +64,7 @@ private:
     ID3D11RenderTargetView* GetBackBufferRtv(ID3D11Texture2D* buffer);
     // 分辨率变化后重建帧纹理/交换链（防止 CopyResource 失败 → 黑屏/花屏）
     void EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src);
+    void EnsureWorkingTexture(UINT width, UINT height);
     void EnsureSwapChainSize(UINT w, UINT h);
     bool EnsureShaders();
     void ReleaseAll();
@@ -82,6 +83,7 @@ private:
     BackBufferRtv backBufferRtv_[3];
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> ps_;
+    ComPtr<ID3D11PixelShader> psPostProcess_;
     ComPtr<ID3D11PixelShader> psPassthrough_;
     ComPtr<ID3D11ComputeShader> cs_;
     ComPtr<ID3D11InputLayout> inputLayout_;
@@ -91,6 +93,9 @@ private:
     ComPtr<ID3D11Buffer> psModeBuffer_;   // 像素着色器色彩空间模式（b1）
     ComPtr<ID3D11Texture2D> frameTexture_;
     ComPtr<ID3D11ShaderResourceView> frameSrv_;
+    ComPtr<ID3D11Texture2D> workingTexture_;
+    ComPtr<ID3D11ShaderResourceView> workingSrv_;
+    ComPtr<ID3D11RenderTargetView> workingRtv_;
     ComPtr<ID3D11Texture2D> backBufferTex_;   // 当前后缓冲（渲染自检读回用）
     ComPtr<ID3D11Texture3D> lutTexture_;
     ComPtr<ID3D11ShaderResourceView> lutSrv_;

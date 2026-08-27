@@ -12,6 +12,11 @@ JsonValue FilterSettings::ToJson() const
     j.Set(L"Highlights", JsonValue::NumValue(Highlights));
     j.Set(L"Shadows", JsonValue::NumValue(Shadows));
     j.Set(L"Temperature", JsonValue::NumValue(Temperature));
+    j.Set(L"Sharpen", JsonValue::NumValue(Sharpen));
+    j.Set(L"NoiseReduction", JsonValue::NumValue(NoiseReduction));
+    j.Set(L"EdgeEnhancement", JsonValue::NumValue(EdgeEnhancement));
+    j.Set(L"Clarity", JsonValue::NumValue(Clarity));
+    j.Set(L"QualityEnhancement", JsonValue::NumValue(QualityEnhancement));
     j.Set(L"ActiveHslChannel", JsonValue::StrValue(ActiveHslChannel));
     j.Set(L"Hue", JsonValue::NumValue(Hue));
     j.Set(L"HslSaturation", JsonValue::NumValue(HslSaturation));
@@ -39,6 +44,11 @@ void FilterSettings::FromJson(const JsonValue& j)
     Highlights = j.GetNumber(L"Highlights", 0);
     Shadows = j.GetNumber(L"Shadows", 0);
     Temperature = j.GetNumber(L"Temperature", 0);
+    Sharpen = j.GetNumber(L"Sharpen", 0);
+    NoiseReduction = j.GetNumber(L"NoiseReduction", 0);
+    EdgeEnhancement = j.GetNumber(L"EdgeEnhancement", 0);
+    Clarity = j.GetNumber(L"Clarity", 0);
+    QualityEnhancement = j.GetNumber(L"QualityEnhancement", 0);
     ActiveHslChannel = j.GetString(L"ActiveHslChannel", HslChannelNames::Master);
     Hue = j.GetNumber(L"Hue", 0);
     HslSaturation = j.GetNumber(L"HslSaturation", 100);

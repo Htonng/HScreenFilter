@@ -10,7 +10,7 @@ struct VSOutput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 VSOutput main(VSInput i) { VSOutput o; o.pos = i.pos; o.uv = i.uv; return o; }
 )HLSL";
 
-// ---------------- 像素着色器：LUT 采样 + 屏幕空间抖动 ----------------
+// ---------------- 像素着色器：LUT 采样，输出线性工作空间 ----------------
 // 输入先转到 sRGB 工作空间做 LUT，再转到输出色彩空间。
 // InputMode / OutputMode：0 sRGB / 1 HDR10 PQ / 2 scRGB 线性。
 // 转换带 SDR 白点缩放（scRGB 1.0 = 80nit；HDR10 PQ 满量程 = 10000nit）。
@@ -105,8 +105,125 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
     // 把 sRGB 值映射到 LUT 纹理坐标：texel i 代表值 i/(N-1)
     float3 u = (rgb * (LUT_N - 1.0) + 0.5) / LUT_N;
     float3 outRgb = LutTexture.Sample(LutSampler, u).rgb;
+    return float4(SrgbToLinear(outRgb), 1.0);
+}
+)HLSL";
 
-    // 仅 SDR 下抖动；HDR PQ/scRGB 空间抖动会在量化处丢失
+// ---------------- 像素着色器：后处理（3x3 锐化 + 最终输出） ----------------
+const char* g_psPostProcessSource = R"HLSL(
+Texture2D WorkingTexture : register(t0);
+SamplerState WorkingSampler : register(s0);
+
+cbuffer Params : register(b0)
+{
+    float MasterHue;
+    float MasterSat;
+    float MasterLight;
+    float GlobalSat;
+    float Temperature;
+    float Contrast;
+    float Brightness;
+    float Highlights;
+    float Shadows;
+    float HueR, SatR, LightR;
+    float HueO, SatO, LightO;
+    float HueY, SatY, LightY;
+    float HueG, SatG, LightG;
+    float HueC, SatC, LightC;
+    float HueB, SatB, LightB;
+    float HueP, SatP, LightP;
+    float HueM, SatM, LightM;
+    float Sharpen;
+    float NoiseReduction;
+    float EdgeEnhancement;
+    float Clarity;
+    float QualityEnhancement;
+    float TexelX;
+    float TexelY;
+};
+
+cbuffer ColorSpace : register(b1)
+{
+    uint InputMode;
+    uint OutputMode;
+    float2 Pad;
+};
+
+static const float SDR_TO_HDR = 80.0 / 10000.0;
+
+float DitherNoise(float2 p)
+{
+    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+float3 SrgbToLinear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+    return lerp(lo, hi, step(0.04045, c));
+}
+
+float3 LinearToSrgb(float3 c)
+{
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, c));
+}
+
+float3 LinearToPq(float3 lin)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    lin = max(lin, 0.0);
+    float3 y = pow(max(lin, 1e-8), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float3 LinearToOutput(float3 lin)
+{
+    if (OutputMode == 1)
+        return LinearToPq(max(lin, 0.0) * SDR_TO_HDR);
+    if (OutputMode == 2)
+        return lin;
+    return LinearToSrgb(saturate(lin));
+}
+
+float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
+{
+    float2 tx = float2(TexelX, 0.0);
+    float2 ty = float2(0.0, TexelY);
+    float3 center = WorkingTexture.Sample(WorkingSampler, uv).rgb;
+    float3 neighbors =
+        WorkingTexture.Sample(WorkingSampler, uv - tx).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + tx).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv - ty).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + ty).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv - tx - ty).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv - tx + ty).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + tx - ty).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + tx + ty).rgb;
+    float3 average = neighbors / 8.0;
+    float3 denoised = lerp(center, average, NoiseReduction);
+    float3 detail = denoised - average;
+    float3 enhanced = denoised + detail * (Sharpen + EdgeEnhancement * 0.8);
+    float2 wideTx = tx * 2.0;
+    float2 wideTy = ty * 2.0;
+    float3 wideAverage = (
+        WorkingTexture.Sample(WorkingSampler, uv - wideTx).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + wideTx).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv - wideTy).rgb +
+        WorkingTexture.Sample(WorkingSampler, uv + wideTy).rgb) / 4.0;
+    float3 clarityDetail = enhanced - wideAverage;
+    enhanced += clarityDetail * Clarity * 0.7;
+    float luminance = dot(enhanced, float3(0.2126, 0.7152, 0.0722));
+    float3 quality = (enhanced - luminance) * (1.0 + QualityEnhancement * 0.35) + luminance;
+    float3 sharpened = lerp(enhanced, quality, QualityEnhancement);
+    float3 outRgb = LinearToOutput(max(sharpened, 0.0));
+
+    // 仅 SDR 下抖动；HDR PQ/scRGB 空间抖动会在量化处丢失。
     if (OutputMode == 0)
     {
         float2 sp = pos.xy;
@@ -116,8 +233,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
             DitherNoise(sp + float2(11.7, 5.9))) * (2.4 / 255.0) - (1.2 / 255.0);
         outRgb = saturate(outRgb + dither);
     }
-
-    return float4(SrgbWorkingToOutput(outRgb), 1.0);
+    return float4(outRgb, 1.0);
 }
 )HLSL";
 

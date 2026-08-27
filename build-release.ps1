@@ -16,7 +16,7 @@ if (-not $tc -or -not (Test-Path "$tc\bin\clang++.exe")) { throw "llvm-mingw too
 
 $clang = "$tc\bin\clang++.exe"
 $windres = "$tc\bin\windres.exe"
-$out = Join-Path $root 'dist\HScreenFilter-v2.0.0'
+$out = Join-Path $root 'dist\HScreenFilter-v2.1.0'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $srcs = @(
@@ -79,7 +79,7 @@ Copy-Item "$root\webui2" $dstWeb -Recurse -Force
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match 'webview2_demo2|\.log$|preview\.png$' } | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # 打包发布 zip
-$zip = Join-Path $root 'dist\HScreenFilter-v2.0.0.zip'
+$zip = Join-Path $root 'dist\HScreenFilter-v2.1.0.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
 
@@ -87,4 +87,4 @@ Write-Host ""
 Write-Host "Build OK: $out\HScreenFilter.exe"
 Write-Host "Run:      $out\HScreenFilter.exe"
 Write-Host "Package:  $zip"
-Write-Host "Version:  v2.0.0"
+Write-Host "Version:  v2.1.0"

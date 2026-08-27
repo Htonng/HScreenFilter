@@ -142,6 +142,11 @@ static void SetBaseValue(FilterSettings &s, const std::wstring &key, double v)
     else if (key == L"highlights") s.Highlights = v;
     else if (key == L"shadows") s.Shadows = v;
     else if (key == L"temperature") s.Temperature = v;
+    else if (key == L"sharpen") s.Sharpen = v;
+    else if (key == L"noiseReduction") s.NoiseReduction = v;
+    else if (key == L"edgeEnhancement") s.EdgeEnhancement = v;
+    else if (key == L"clarity") s.Clarity = v;
+    else if (key == L"qualityEnhancement") s.QualityEnhancement = v;
 }
 
 static void SetHslValue(FilterSettings &s, int channel, int field, double value)
@@ -267,7 +272,10 @@ static void ApplyLutMode(bool useLut)
 static bool SettingsEqual(const FilterSettings &a, const FilterSettings &b)
 {
     if (a.Brightness != b.Brightness || a.Contrast != b.Contrast || a.Saturation != b.Saturation ||
-        a.Highlights != b.Highlights || a.Shadows != b.Shadows || a.Temperature != b.Temperature) return false;
+        a.Highlights != b.Highlights || a.Shadows != b.Shadows || a.Temperature != b.Temperature ||
+        a.Sharpen != b.Sharpen || a.NoiseReduction != b.NoiseReduction ||
+        a.EdgeEnhancement != b.EdgeEnhancement || a.Clarity != b.Clarity ||
+        a.QualityEnhancement != b.QualityEnhancement) return false;
     if (a.Hue != b.Hue || a.HslSaturation != b.HslSaturation || a.Lightness != b.Lightness) return false;
     if (a.HslChannels.size() != b.HslChannels.size()) return false;
     for (size_t i = 0; i < a.HslChannels.size(); i++)
@@ -738,6 +746,11 @@ static JsonValue SettingsToJson(const FilterSettings &s)
     base.Set(L"highlights", JsonValue::NumValue(s.Highlights));
     base.Set(L"shadows", JsonValue::NumValue(s.Shadows));
     base.Set(L"temperature", JsonValue::NumValue(s.Temperature));
+    base.Set(L"sharpen", JsonValue::NumValue(s.Sharpen));
+    base.Set(L"noiseReduction", JsonValue::NumValue(s.NoiseReduction));
+    base.Set(L"edgeEnhancement", JsonValue::NumValue(s.EdgeEnhancement));
+    base.Set(L"clarity", JsonValue::NumValue(s.Clarity));
+    base.Set(L"qualityEnhancement", JsonValue::NumValue(s.QualityEnhancement));
     JsonValue master = JsonValue::ObjectValue();
     master.Set(L"h", JsonValue::NumValue(s.Hue));
     master.Set(L"s", JsonValue::NumValue(s.HslSaturation));

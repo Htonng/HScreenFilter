@@ -58,6 +58,13 @@ struct FilterSettings
     double Shadows = 0.0;      // -100..100
     double Temperature = 0.0;  // -100..100
 
+    // LUT 后处理参数：0..100，非 LUT 引擎下保留但不应用
+    double Sharpen = 0.0;
+    double NoiseReduction = 0.0;
+    double EdgeEnhancement = 0.0;
+    double Clarity = 0.0;
+    double QualityEnhancement = 0.0;
+
     std::wstring ActiveHslChannel = HslChannelNames::Master;
 
     double Hue = 0.0;             // 主色系（全部）
@@ -98,7 +105,9 @@ struct FilterSettings
     bool IsNeutral() const
     {
         if (Brightness != 0 || Contrast != 100 || Saturation != 100 ||
-            Highlights != 0 || Shadows != 0 || Temperature != 0) return false;
+            Highlights != 0 || Shadows != 0 || Temperature != 0 ||
+            Sharpen != 0 || NoiseReduction != 0 || EdgeEnhancement != 0 ||
+            Clarity != 0 || QualityEnhancement != 0) return false;
         if (Hue != 0 || HslSaturation != 100 || Lightness != 0) return false;
         for (const auto& c : HslChannels)
             if (!c.IsNeutral()) return false;
@@ -110,7 +119,9 @@ struct FilterSettings
     {
         return Hue == 0 && HslSaturation == 100 && Lightness == 0 &&
                Saturation == 100 && Contrast == 100 && Brightness == 0 &&
-               Temperature == 0 && Highlights == 0 && Shadows == 0;
+               Temperature == 0 && Highlights == 0 && Shadows == 0 &&
+               Sharpen == 0 && NoiseReduction == 0 && EdgeEnhancement == 0 &&
+               Clarity == 0 && QualityEnhancement == 0;
     }
 
     JsonValue ToJson() const;

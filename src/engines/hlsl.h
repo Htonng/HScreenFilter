@@ -11,14 +11,16 @@ namespace hsf {
 // 常量缓冲布局（40 个 float = 160 字节，16 字节对齐）
 // 0..8   : MasterHue, MasterSat, MasterLight, GlobalSat, Temperature, Contrast, Brightness, Highlights, Shadows
 // 9..32  : 8 个色系 × (Hue, Sat, Light)
-// 33..39 : 保留（0）
+// 33..39 : Sharpen / NoiseReduction / EdgeEnhancement / Clarity / QualityEnhancement / TexelX / TexelY
 constexpr int kParamsFloatCount = 40;
 constexpr int kLutSize = 64;
 
-// 像素着色器（LUT 采样 + 屏幕空间抖动）
+// 像素着色器（LUT 采样，输出线性工作空间中间纹理）
 extern const char* g_psLutSource;
 // 像素着色器（中性直通：仅采样输入纹理，用于格式无关的透明直通）
 extern const char* g_psPassthroughSource;
+// 像素着色器（后处理：3x3 锐化 + 线性工作空间转最终输出）
+extern const char* g_psPostProcessSource;
 // 顶点着色器（全屏三角形）
 extern const char* g_vsSource;
 // 计算着色器（参数变化时重建 LUT）

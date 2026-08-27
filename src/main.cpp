@@ -80,6 +80,11 @@ static int RunSelfTest()
         data.GlobalModifiers = 0x2;
         data.GlobalDisplay = L"Ctrl+1";
         data.Current.Brightness = -12.5;
+        data.Current.Sharpen = 42;
+        data.Current.NoiseReduction = 23;
+        data.Current.EdgeEnhancement = 34;
+        data.Current.Clarity = 45;
+        data.Current.QualityEnhancement = 56;
         data.Current.HslSaturation = 150;
         data.Current.FindChannel(HslChannelNames::Red)->Hue = 30;
         Profile p;
@@ -113,6 +118,11 @@ static int RunSelfTest()
             bool ok = back.IsEnabled == true && back.UseDxgi == true &&
                       back.Theme == L"mica" && back.GlobalDisplay == L"Ctrl+1" &&
                       back.Current.Brightness == -12.5 &&
+                      back.Current.Sharpen == 42 &&
+                      back.Current.NoiseReduction == 23 &&
+                      back.Current.EdgeEnhancement == 34 &&
+                      back.Current.Clarity == 45 &&
+                      back.Current.QualityEnhancement == 56 &&
                       back.Current.HslSaturation == 150 &&
                       back.Current.FindChannel(HslChannelNames::Red) &&
                       back.Current.FindChannel(HslChannelNames::Red)->Hue == 30 &&
@@ -131,6 +141,12 @@ static int RunSelfTest()
             {
                 out(L"[ OK ] JSON 序列化/解析往返一致");
             }
+            FilterSettings legacy;
+            if (legacy.Sharpen != 0)
+            {
+                out(L"[FAIL] 旧配置缺少锐化字段时未使用默认值 0");
+                fails++;
+            }
         }
     }
 
@@ -146,6 +162,15 @@ static int RunSelfTest()
         else
         {
             out(L"[ OK ] 像素着色器编译成功 (ps_4_0)");
+        }
+        if (!CompileShader(g_psPostProcessSource, "main", "ps_4_0", blob, err))
+        {
+            out(L"[FAIL] 后处理像素着色器编译失败: " + err);
+            fails++;
+        }
+        else
+        {
+            out(L"[ OK ] 后处理像素着色器编译成功 (ps_4_0)");
         }
         if (!CompileShader(g_csLutSource, "CSMain", "cs_5_0", blob, err))
         {

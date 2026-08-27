@@ -43,6 +43,13 @@ void LutEngine::Apply(const FilterSettings& s)
         p[idx++] = ch == nullptr ? 0.0f : (float)(ch->Lightness / 100.0 * kAdjustStrength);
     }
     for (; idx < kParamsFloatCount; idx++) p[idx] = 0.0f;
+    p[33] = (float)(s.Sharpen / 100.0 * 0.75);                                // Sharpen
+    p[34] = (float)(s.NoiseReduction / 100.0 * 0.65);                         // NoiseReduction
+    p[35] = (float)(s.EdgeEnhancement / 100.0 * 0.75);                         // EdgeEnhancement
+    p[36] = (float)(s.Clarity / 100.0 * 0.65);                                // Clarity
+    p[37] = (float)(s.QualityEnhancement / 100.0 * 0.65);                     // QualityEnhancement
+    p[38] = width_ > 0 ? 1.0f / (float)width_ : 0.0f;                         // TexelX
+    p[39] = height_ > 0 ? 1.0f / (float)height_ : 0.0f;                       // TexelY
 
     neutral_.store(s.IsNeutral());
     paramsDirty_.store(true);
@@ -219,6 +226,12 @@ bool LutEngine::CreatePipeline()
                                           ps_.GetAddressOf())))
         return false;
 
+    ComPtr<ID3DBlob> psPostProcessBlob;
+    if (!CompileShader(g_psPostProcessSource, "main", "ps_4_0", psPostProcessBlob, LastError)) return false;
+    if (FAILED(device_->CreatePixelShader(psPostProcessBlob->GetBufferPointer(), psPostProcessBlob->GetBufferSize(), nullptr,
+                                          psPostProcess_.GetAddressOf())))
+        return false;
+
     // 像素着色器（中性直通）
     ComPtr<ID3DBlob> psPassBlob;
     if (!CompileShader(g_psPassthroughSource, "main", "ps_4_0", psPassBlob, LastError)) return false;
@@ -289,6 +302,9 @@ bool LutEngine::CreatePipeline()
     texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device_->CreateTexture2D(&texDesc, nullptr, frameTexture_.GetAddressOf()))) return false;
     if (FAILED(device_->CreateShaderResourceView(frameTexture_.Get(), nullptr, frameSrv_.GetAddressOf()))) return false;
+
+    EnsureWorkingTexture((UINT)width_, (UINT)height_);
+    if (!workingTexture_ || !workingSrv_ || !workingRtv_) return false;
 
     // 3D LUT（64^3，R16G16B16A16_FLOAT，SRV + UAV）
     D3D11_TEXTURE3D_DESC lutDesc{};
@@ -491,11 +507,42 @@ void LutEngine::EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src)
     device_->CreateShaderResourceView(frameTexture_.Get(), nullptr, frameSrv_.GetAddressOf());
 }
 
+void LutEngine::EnsureWorkingTexture(UINT width, UINT height)
+{
+    if (workingTexture_)
+    {
+        D3D11_TEXTURE2D_DESC current{};
+        workingTexture_->GetDesc(&current);
+        if (current.Width == width && current.Height == height) return;
+    }
+    workingRtv_.Reset();
+    workingSrv_.Reset();
+    workingTexture_.Reset();
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, workingTexture_.GetAddressOf()))) return;
+    if (FAILED(device_->CreateShaderResourceView(workingTexture_.Get(), nullptr, workingSrv_.GetAddressOf()))) return;
+    device_->CreateRenderTargetView(workingTexture_.Get(), nullptr, workingRtv_.GetAddressOf());
+}
+
 void LutEngine::EnsureSwapChainSize(UINT w, UINT h)
 {
     if ((int)w == width_ && (int)h == height_) return;
     width_ = (int)w;
     height_ = (int)h;
+    {
+        std::lock_guard<std::mutex> lock(paramsMutex_);
+        params_[38] = width_ > 0 ? 1.0f / (float)width_ : 0.0f;
+        params_[39] = height_ > 0 ? 1.0f / (float)height_ : 0.0f;
+        paramsDirty_.store(true);
+    }
     backBufferTex_.Reset();
     for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
     if (swapChain_)
@@ -529,6 +576,7 @@ void LutEngine::RenderLoop()
                     tex->GetDesc(&d);
                     EnsureSwapChainSize(d.Width, d.Height);
                     EnsureFrameTexture(tex);
+                    EnsureWorkingTexture(d.Width, d.Height);
 
                     // 输入模式按捕获纹理格式判定（与输出模式相互独立）
                     int newInputMode = 0;
@@ -672,9 +720,8 @@ void LutEngine::DrawAndPresent()
     }
     else
     {
+        if (!workingRtv_ || !workingSrv_) return;
         const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
-        context_->ClearRenderTargetView(rtv, clearColor);
-        context_->OMSetRenderTargets(1, &rtv, nullptr);
         D3D11_VIEWPORT vp{ 0, 0, (float)width_, (float)height_, 0, 1 };
         context_->RSSetViewports(1, &vp);
         context_->RSSetState(rasterizer_.Get());
@@ -683,12 +730,28 @@ void LutEngine::DrawAndPresent()
         UINT stride = 24, offset = 0;
         context_->IASetVertexBuffers(0, 1, vertexBuffer_.GetAddressOf(), &stride, &offset);
         context_->VSSetShader(vs_.Get(), nullptr, 0);
+
+        // 第一遍：捕获帧 -> LUT/颜色处理 -> 线性工作空间中间纹理。
+        context_->ClearRenderTargetView(workingRtv_.Get(), clearColor);
+        ID3D11RenderTargetView* workingTarget = workingRtv_.Get();
+        context_->OMSetRenderTargets(1, &workingTarget, nullptr);
         context_->PSSetShader(ps_.Get(), nullptr, 0);
         context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
         context_->PSSetShaderResources(0, 1, frameSrv_.GetAddressOf());
         context_->PSSetShaderResources(1, 1, lutSrv_.GetAddressOf());
         context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
         context_->PSSetSamplers(1, 1, lutSampler_.GetAddressOf());
+        context_->Draw(3, 0);
+
+        // 第二遍：后处理入口。当前实现是锐化，后续效果可继续挂在这里。
+        context_->ClearRenderTargetView(rtv, clearColor);
+        context_->OMSetRenderTargets(1, &rtv, nullptr);
+        context_->PSSetShader(psPostProcess_.Get(), nullptr, 0);
+        context_->PSSetConstantBuffers(0, 1, paramsBuffer_.GetAddressOf());
+        context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
+        ID3D11ShaderResourceView* postSrv[] = { workingSrv_.Get(), nullptr };
+        context_->PSSetShaderResources(0, 2, postSrv);
+        context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
         context_->Draw(3, 0);
     }
 
@@ -772,12 +835,16 @@ void LutEngine::ReleaseAll()
     lutTexture_.Reset();
     frameSrv_.Reset();
     frameTexture_.Reset();
+    workingRtv_.Reset();
+    workingSrv_.Reset();
+    workingTexture_.Reset();
     paramsBuffer_.Reset();
     psModeBuffer_.Reset();
     vertexBuffer_.Reset();
     rasterizer_.Reset();
     inputLayout_.Reset();
     ps_.Reset();
+    psPostProcess_.Reset();
     psPassthrough_.Reset();
     vs_.Reset();
     cs_.Reset();

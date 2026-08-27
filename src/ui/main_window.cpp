@@ -354,7 +354,10 @@ void MainWindow::DestroyPage()
     pageControls_.clear();
     for (auto& s : pgSliderBase) s = nullptr;
     for (auto& e : pgEditBase) e = nullptr;
+    for (auto& s : pgSliderAdvanced) s = nullptr;
+    for (auto& e : pgEditAdvanced) e = nullptr;
     pgLutSwitch = pgVsyncSwitch = pgHslTab = pgHslHint = nullptr;
+    pgAdvancedHint = nullptr;
     for (auto& s : pgSliderHsl) s = nullptr;
     for (auto& e : pgEditHsl) e = nullptr;
     pgPerAppSwitch = pgBindingList = pgPerAppStatus = nullptr;
@@ -410,6 +413,24 @@ void MainWindow::BuildPageBase()
     AddButton(IDC_PRESET_EYE, L"护眼", bx, y, 80, 28); bx += 88;
     AddButton(IDC_PRESET_NIGHT, L"夜间", bx, y, 80, 28); bx += 88;
     AddButton(IDC_PRESET_VIVID, L"鲜艳", bx, y, 80, 28);
+
+    y += 62;
+    AddStatic(0, L"高级调整", x, y, 140, 26, 15, true);
+    AddStatic(0, L"仅在 LUT 引擎启用后生效。", x + 146, y + 2, w - 146, 20, 11);
+    static const wchar_t* advancedNames[5] = { L"锐化 Sharpen", L"降噪 Noise Reduction",
+                                                L"边缘增强 Edge Enhancement", L"清晰度 Clarity",
+                                                L"画质增强 Quality Enhancement" };
+    y += 38;
+    for (int i = 0; i < 5; i++)
+    {
+        AddStatic(0, advancedNames[i], x, y, kLabelW, 22, 12);
+        pgSliderAdvanced[i] = AddTrack(500 + i, x + kLabelW + kTrackGap, y - 2,
+            w - kLabelW - kTrackGap - kEditW - kTrackGap, 26, 0, 100);
+        pgEditAdvanced[i] = AddEdit(600 + i, x + w - kEditW, y, kEditW, 24);
+        y += kSliderRowH;
+    }
+    pgAdvancedHint = AddStatic(0, L"", x, y + 2, w, 38, 11);
+    UpdateAdvancedControls();
 }
 
 void MainWindow::BuildPageHsl()
@@ -581,6 +602,7 @@ void MainWindow::UpdateSliderUi(int sliderId, double value, bool updateEdit)
     HWND track = nullptr, edit = nullptr;
     double base = NAN;
     if (sliderId >= 100 && sliderId < 106) { track = pgSliderBase[sliderId - 100]; edit = pgEditBase[sliderId - 100]; }
+    else if (sliderId >= 500 && sliderId < 505) { track = pgSliderAdvanced[sliderId - 500]; edit = pgEditAdvanced[sliderId - 500]; }
     else if (sliderId >= 300 && sliderId < 327) { track = pgSliderHsl[sliderId - 300]; edit = pgEditHsl[sliderId - 300]; base = hslSpecs_[sliderId - 300].displayBase; }
     if (!track) return;
     SendMessageW(track, TBM_SETPOS, TRUE, (int)value);
@@ -604,6 +626,19 @@ void MainWindow::ApplySliderValue(int sliderId, double value)
         case 3: cur.Highlights = value; break;
         case 4: cur.Shadows = value; break;
         case 5: cur.Temperature = value; break;
+        }
+        ScheduleApply();
+    }
+    else if (sliderId >= 500 && sliderId < 505)
+    {
+        auto& cur = CurrentDisplay().Current;
+        switch (sliderId - 500)
+        {
+        case 0: cur.Sharpen = value; break;
+        case 1: cur.NoiseReduction = value; break;
+        case 2: cur.EdgeEnhancement = value; break;
+        case 3: cur.Clarity = value; break;
+        case 4: cur.QualityEnhancement = value; break;
         }
         ScheduleApply();
     }
@@ -775,6 +810,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         int editId = (int)wParam;
         HWND edit = GetDlgItem(hwnd_, editId);
         int sliderId = (editId >= 200 && editId < 206) ? 100 + (editId - 200)
+                 : (editId >= 600 && editId < 605) ? 500 + (editId - 600)
                      : (editId >= 400 && editId < 427) ? 300 + (editId - 400) : -1;
         if (edit && sliderId > 0)
         {
@@ -792,6 +828,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
                     static const double maxs[6] = { 100, 200, 200, 100, 100, 100 };
                     min = mins[sliderId - 100]; max = maxs[sliderId - 100];
                 }
+                else if (sliderId >= 500 && sliderId < 505)
+                {
+                    min = 0; max = 100;
+                }
                 else if (sliderId - 300 < (int)hslSpecs_.size())
                 {
                     min = hslSpecs_[sliderId - 300].min;
@@ -805,7 +845,30 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 double cur = 0;
                 if (sliderId >= 100 && sliderId < 106)
-                    cur = CurrentDisplay().Current.Brightness;
+                {
+                    const auto& s = CurrentDisplay().Current;
+                    switch (sliderId - 100)
+                    {
+                    case 0: cur = s.Brightness; break;
+                    case 1: cur = s.Contrast; break;
+                    case 2: cur = s.Saturation; break;
+                    case 3: cur = s.Highlights; break;
+                    case 4: cur = s.Shadows; break;
+                    case 5: cur = s.Temperature; break;
+                    }
+                }
+                else if (sliderId >= 500 && sliderId < 505)
+                {
+                    const auto& s = CurrentDisplay().Current;
+                    switch (sliderId - 500)
+                    {
+                    case 0: cur = s.Sharpen; break;
+                    case 1: cur = s.NoiseReduction; break;
+                    case 2: cur = s.EdgeEnhancement; break;
+                    case 3: cur = s.Clarity; break;
+                    case 4: cur = s.QualityEnhancement; break;
+                    }
+                }
                 UpdateSliderUi(sliderId, cur, true);
             }
         }
@@ -1168,6 +1231,22 @@ void MainWindow::UpdateEngineStatus()
         break;
     }
     UpdateHslHint();
+    UpdateAdvancedControls();
+}
+
+void MainWindow::UpdateAdvancedControls()
+{
+    bool enabled = data_.UseDxgi && FilterEngine::Instance().Kind() == EngineKind::PixelShader;
+    for (HWND control : pgSliderAdvanced)
+        if (control) EnableWindow(control, enabled);
+    for (HWND control : pgEditAdvanced)
+        if (control) EnableWindow(control, enabled);
+    if (pgAdvancedHint)
+    {
+        SetWindowTextW(pgAdvancedHint, enabled
+            ? L"高级画质处理已就绪：锐化、降噪、边缘增强、清晰度和画质增强将在 LUT 后处理阶段生效。"
+            : L"提示：请先启用 LUT 引擎，高级画质调整才能生效（放大镜/伽马引擎不支持空间后处理）。当前参数仍会保存。");
+    }
 }
 
 void MainWindow::UpdateHslHint()
@@ -1219,6 +1298,7 @@ void MainWindow::ApplyLutModeNoDialog(bool useLut)
     if (useLut && CurrentDisplay().IsEnabled)
         FilterEngine::Instance().SetVsync(currentDisplayIndex_, CurrentDisplay().UseVsync);
     UpdateEngineStatus();
+    UpdateAdvancedControls();
 }
 
 void MainWindow::ApplyProfileLut(int profileIndex)
@@ -1279,6 +1359,8 @@ void MainWindow::LoadSettingsIntoUi(const FilterSettings& s)
     double vals[6] = { s.Brightness, s.Contrast, s.Saturation, s.Highlights, s.Shadows, s.Temperature };
     for (int i = 0; i < 6; i++)
         UpdateSliderUi(100 + i, Clamp(vals[i], mins[i], maxs[i]), true);
+    double advanced[5] = { s.Sharpen, s.NoiseReduction, s.EdgeEnhancement, s.Clarity, s.QualityEnhancement };
+    for (int i = 0; i < 5; i++) UpdateSliderUi(500 + i, Clamp(advanced[i], 0.0, 100.0), true);
     LoadHslSliders(const_cast<FilterSettings&>(s));
 }
 

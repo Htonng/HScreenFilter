@@ -429,6 +429,12 @@ input:checked + .track .knob { left: 18px; }
 .flat-range::-webkit-slider-thumb:active { cursor: grabbing; }
 .flat-range:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
 
+/* ───────────── 高级调整 ───────────── */
+.advanced-block { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.advanced-block .page-head h2 { font-size: 15px; font-weight: 700; }
+.advanced-block.advanced-disabled .slider-row { opacity: .45; pointer-events: none; }
+.advanced-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-3); white-space: pre-line; }
+
 /* ───────────── 快捷预设 ───────────── */
 .preset-block { margin-top: 18px; }
 .preset-block h2 { font-size: 13px; margin-bottom: 10px; }

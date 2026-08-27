@@ -11,6 +11,8 @@ const RANGES = {
   base: {
     brightness: [-100, 100], contrast: [0, 200], saturation: [0, 200],
     highlights: [-100, 100], shadows: [-100, 100], temperature: [-100, 100],
+    sharpen: [0, 100], noiseReduction: [0, 100], edgeEnhancement: [0, 100],
+    clarity: [0, 100], qualityEnhancement: [0, 100],
   },
   hsl: {
     hueMaster: [-180, 180], hueChannel: [-30, 30],
@@ -19,10 +21,12 @@ const RANGES = {
   },
 };
 const BASE_KEYS = ['brightness', 'contrast', 'saturation', 'highlights', 'shadows', 'temperature'];
+const ADVANCED_KEYS = ['sharpen', 'noiseReduction', 'edgeEnhancement', 'clarity', 'qualityEnhancement'];
 const BASE_LABELS = {
   brightness: '亮度 Brightness', contrast: '对比度 Contrast', saturation: '鲜艳度 Saturation',
   highlights: '亮部 Highlights', shadows: '暗部 Shadows', temperature: '色温（冷 ← → 暖）',
 };
+const ADVANCED_LABELS = { sharpen: '锐化 Sharpen', noiseReduction: '降噪 Noise Reduction', edgeEnhancement: '边缘增强 Edge Enhancement', clarity: '清晰度 Clarity', qualityEnhancement: '画质增强 Quality Enhancement' };
 const CHANNELS = [
   { name: '全部（主）', color: '#8899AA', hue: 210, master: true },
   { name: '红',   color: '#FF0000', hue: 0 },
@@ -40,7 +44,7 @@ const FIELD_NAMES = ['色相', '饱和度', '明亮度'];
 const state = {
   initialized: false,
   settings: {
-    base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0 },
+    base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
     hsl: { master: { h: 0, s: 100, l: 0 }, channels: CHANNELS.slice(1).map(c => ({ name: c.name, h: 0, s: 100, l: 0 })) },
   },
   hslField: 0,
@@ -74,6 +78,7 @@ window.addEventListener('message', ev => { if (ev.data) handleHost(ev.data); });
 window.addEventListener('load', () => {
   if (window.__hsfInitField !== undefined) state.hslField = window.__hsfInitField;
   buildBaseSliders();
+  buildAdvancedSliders();
   buildHslTabsAndChips();
   buildHslSliders();
   initTheme();
@@ -132,7 +137,7 @@ function defaultState() {
     engine: '滤镜引擎：LUT 逐像素引擎',
     profiles: [], activeProfile: -1, bindings: [],
     settings: {
-      base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0 },
+      base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
       hsl: { master: { h: 0, s: 100, l: 0 }, channels: CHANNELS.slice(1).map(c => ({ name: c.name, h: 0, s: 100, l: 0 })) },
     },
   };
@@ -167,6 +172,7 @@ function applyState(p) {
   renderBindings();
   applyControls();
   refreshBaseSliders();
+  refreshAdvancedSliders();
   buildHslSliders();
   updateEngineStatus();
   updateHslEnabled();
@@ -254,6 +260,61 @@ function refreshBaseSliders() {
     num.value = state.settings.base[key];
     paintFill(input, min, max, +input.value, input.dataset.gradient || '');
   });
+}
+
+/* ── 高级调整（LUT 后处理）── */
+function buildAdvancedSliders() {
+  const group = $('#advancedSliders');
+  group.innerHTML = '';
+  ADVANCED_KEYS.forEach(key => {
+    const row = document.createElement('div');
+    row.className = 'slider-row';
+    row.dataset.key = key;
+    const label = document.createElement('div');
+    label.className = 'slider-label';
+    const span = document.createElement('span');
+    span.textContent = ADVANCED_LABELS[key];
+    const num = document.createElement('input');
+    num.type = 'number'; num.className = 'num';
+    label.append(span, num);
+    const input = document.createElement('input');
+    input.type = 'range'; input.className = 'flat-range';
+    input.min = 0; input.max = 100;
+    input.dataset.key = key;
+    const value = state.settings.base[key] || 0;
+    input.value = value; num.value = value;
+    const update = v => {
+      state.settings.base[key] = v; input.value = v; num.value = v;
+      paintFill(input, 0, 100, v, '');
+      markDirty();
+      send({ type: 'base', key, value: v });
+    };
+    input.addEventListener('input', () => update(+input.value));
+    num.addEventListener('change', () => {
+      let v = +num.value; if (isNaN(v)) v = +input.value;
+      update(Math.max(0, Math.min(100, v)));
+    });
+    row.append(label, input);
+    paintFill(input, 0, 100, value, '');
+    group.appendChild(row);
+  });
+}
+function refreshAdvancedSliders() {
+  $$('#advancedSliders .flat-range').forEach(input => {
+    const key = input.dataset.key;
+    const value = state.settings.base[key] || 0;
+    input.value = value;
+    const num = input.closest('.slider-row').querySelector('.num');
+    num.value = value;
+    paintFill(input, 0, 100, value, '');
+  });
+  const enabled = !!state.lut;
+  const block = $('#advancedSliders');
+  if (block) block.classList.toggle('advanced-disabled', !enabled);
+  const hint = $('#advancedHint');
+  if (hint) hint.textContent = enabled
+    ? '高级画质处理已启用，将在 LUT 后处理阶段生效。'
+    : '提示：请先启用 LUT 引擎，高级调整才能生效。当前参数仍会保存。';
 }
 
 /* ── HSL 选项卡 + 色系 ── */
@@ -545,16 +606,17 @@ function wireStaticControls() {
 
   // 快捷预设（数值与原项目一致）
   const PRESETS = {
-    default: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0 },
-    eye:     { brightness: -5, contrast: 95, saturation: 95, highlights: 0, shadows: 0, temperature: 25 },
-    night:   { brightness: -40, contrast: 100, saturation: 90, highlights: 0, shadows: 0, temperature: 45 },
-    vivid:   { brightness: 0, contrast: 110, saturation: 150, highlights: 0, shadows: 0, temperature: 0 },
+    default: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
+    eye:     { brightness: -5, contrast: 95, saturation: 95, highlights: 0, shadows: 0, temperature: 25, sharpen: 0 },
+    night:   { brightness: -40, contrast: 100, saturation: 90, highlights: 0, shadows: 0, temperature: 45, sharpen: 0 },
+    vivid:   { brightness: 0, contrast: 110, saturation: 150, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
   };
   $$('.preset').forEach(b => b.addEventListener('click', () => {
     const p = PRESETS[b.dataset.preset];
     if (!p) return;
-    state.settings.base = Object.assign({}, p);
+    state.settings.base = Object.assign(state.settings.base, p);
     refreshBaseSliders();
+    refreshAdvancedSliders();
     markDirty();
     send({ type: 'preset', name: b.dataset.preset });
   }));

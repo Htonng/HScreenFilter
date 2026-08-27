@@ -39,8 +39,10 @@ enum CtrlId
     IDC_HOTKEY_CLEAR_GLOBAL,
     IDC_GLOBAL_HINT,
 
-    IDC_SLIDER_BASE_FIRST = 100, // 基础滑块 100..105
+    IDC_SLIDER_BASE_FIRST = 100, // 基础滑块 100..106
     IDC_EDIT_BASE_FIRST = 200,   // 数值框 200..205
+    IDC_SLIDER_ADV_FIRST = 500,  // 高级滑块 500..504
+    IDC_EDIT_ADV_FIRST = 600,    // 高级数值框 600..604
     IDC_PRESET_DEFAULT,
     IDC_PRESET_EYE,
     IDC_PRESET_NIGHT,
@@ -172,6 +174,7 @@ private:
     void UpdateHslHint();
     void ApplyLutMode(bool useLut);
     void ApplyLutModeNoDialog(bool useLut);
+    void UpdateAdvancedControls();
     void ApplyProfileLut(int profileIndex);
     void OnLutSwitchToggled();
     void UpdateGlobalHotkeyBadge();
@@ -264,6 +267,8 @@ private:
     std::vector<HWND> pageControls_;
 
     HWND pgSliderBase[6] = {}, pgEditBase[6] = {};
+    HWND pgSliderAdvanced[5] = {}, pgEditAdvanced[5] = {};
+    HWND pgAdvancedHint = nullptr;
     HWND pgLutSwitch = nullptr, pgVsyncSwitch = nullptr, pgHslTab = nullptr, pgHslHint = nullptr;
     HWND pgSliderHsl[27] = {}, pgEditHsl[27] = {};
     HWND pgPerAppSwitch = nullptr, pgBindingList = nullptr, pgPerAppStatus = nullptr;
