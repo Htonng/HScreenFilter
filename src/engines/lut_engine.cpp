@@ -20,6 +20,24 @@ LutEngine::~LutEngine()
 
 // ---------------- 参数 ----------------
 
+// 诊断跟踪：设置环境变量 HSF_TRACE=1 后，渲染循环会在关键阶段打点，
+// 用于定位"卡在捕获 / 卡在 Present / 卡在恢复"这类问题（默认关闭，零开销）。
+static bool TraceEnabled()
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        wchar_t buf[8] = {};
+        cached = (GetEnvironmentVariableW(L"HSF_TRACE", buf, 8) > 0 && buf[0] != L'0') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static void Trace(const wchar_t* stage)
+{
+    if (TraceEnabled()) Log::WriteFmt(L"LutEngine", L"[trace] %s", stage);
+}
+
 void LutEngine::Apply(const FilterSettings& s)
 {
     std::lock_guard<std::mutex> lock(paramsMutex_);
@@ -50,6 +68,9 @@ void LutEngine::Apply(const FilterSettings& s)
     p[37] = (float)(s.QualityEnhancement / 100.0 * 0.65);                     // QualityEnhancement
     p[38] = width_ > 0 ? 1.0f / (float)width_ : 0.0f;                         // TexelX
     p[39] = height_ > 0 ? 1.0f / (float)height_ : 0.0f;                       // TexelY
+    // PostActive：五项后处理参数全为 0 时走单遍着色器的快路径（只做 1 次输入采样）
+    p[40] = (p[33] == 0.0f && p[34] == 0.0f && p[35] == 0.0f &&
+             p[36] == 0.0f && p[37] == 0.0f) ? 0.0f : 1.0f;
 
     neutral_.store(s.IsNeutral());
     paramsDirty_.store(true);
@@ -149,6 +170,44 @@ void LutEngine::ApplyOverlayAffinity()
 {
     if (!hwnd_) return;
     SetWindowDisplayAffinity(hwnd_, Capturable ? WDA_MONITOR : WDA_EXCLUDEFROMCAPTURE);
+    Log::WriteFmt(L"LutEngine", L"覆盖层捕获亲和性: %s (Capturable=%d)",
+                  Capturable ? L"WDA_MONITOR 可被第三方录制"
+                             : L"WDA_EXCLUDEFROMCAPTURE 第三方录制看不到本层/部分录制工具会失败",
+                  Capturable ? 1 : 0);
+}
+
+// 显示/隐藏覆盖层。捕获不可用（游戏独占全屏、显示模式切换中）时必须隐藏，
+// 否则屏幕上会冻结最后一帧 —— 表现为"画面不动/屏幕变暗"且滤镜已失效。
+// 注意历史坑（v2.0.0-beta 卡死根因）：flip 模型交换链向"未显示的窗口"Present 会永久
+// 阻塞。因此：隐藏期间绝不 Present（见 DrawAndPresent 的可见性护栏），显示后先确认
+// 窗口真的可见再继续渲染。
+void LutEngine::SetOverlayVisible(bool visible)
+{
+    if (!hwnd_) return;
+    if (overlayVisible_.exchange(visible) == visible) return;
+    // 覆盖层窗口属于"调用 Start 的线程"（通常是 UI 线程），而本函数在渲染线程里调用：
+    // 必须用异步窗口操作（*Async / SWP_ASYNCWINDOWPOS），否则一旦 UI 线程正阻塞在
+    // join()/模态循环里，这里的同步 SendMessage 会与它互相死等。
+    if (visible)
+    {
+        ShowWindowAsync(hwnd_, SW_SHOWNOACTIVATE);
+        SetWindowPos(hwnd_, HWND_TOPMOST, x_, y_, width_, height_,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
+        // 等窗口真正可见（异步操作由 UI 线程执行；有界等待，避免与 join 死锁）
+        for (int i = 0; i < 50 && running_; i++)
+        {
+            if (IsWindowVisible(hwnd_)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!IsWindowVisible(hwnd_))
+            Log::Write(L"LutEngine", L"覆盖层显示尚未生效，本帧跳过呈现");
+    }
+    else
+    {
+        ShowWindowAsync(hwnd_, SW_HIDE);
+    }
+    Trace(visible ? L"覆盖层显示" : L"覆盖层隐藏");
+    Log::WriteFmt(L"LutEngine", L"覆盖层%s", visible ? L"已显示" : L"已隐藏（等待捕获恢复）");
 }
 
 LRESULT CALLBACK LutEngine::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -219,17 +278,11 @@ bool LutEngine::CreatePipeline()
                                            vs_.GetAddressOf())))
         return false;
 
-    // 像素着色器（LUT 采样）
+    // 像素着色器（单遍合并：LUT 采样 + 可选线性光后处理）
     ComPtr<ID3DBlob> psBlob;
     if (!CompileShader(g_psLutSource, "main", "ps_4_0", psBlob, LastError)) return false;
     if (FAILED(device_->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
                                           ps_.GetAddressOf())))
-        return false;
-
-    ComPtr<ID3DBlob> psPostProcessBlob;
-    if (!CompileShader(g_psPostProcessSource, "main", "ps_4_0", psPostProcessBlob, LastError)) return false;
-    if (FAILED(device_->CreatePixelShader(psPostProcessBlob->GetBufferPointer(), psPostProcessBlob->GetBufferSize(), nullptr,
-                                          psPostProcess_.GetAddressOf())))
         return false;
 
     // 像素着色器（中性直通）
@@ -302,9 +355,6 @@ bool LutEngine::CreatePipeline()
     texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device_->CreateTexture2D(&texDesc, nullptr, frameTexture_.GetAddressOf()))) return false;
     if (FAILED(device_->CreateShaderResourceView(frameTexture_.Get(), nullptr, frameSrv_.GetAddressOf()))) return false;
-
-    EnsureWorkingTexture((UINT)width_, (UINT)height_);
-    if (!workingTexture_ || !workingSrv_ || !workingRtv_) return false;
 
     // 3D LUT（64^3，R16G16B16A16_FLOAT，SRV + UAV）
     D3D11_TEXTURE3D_DESC lutDesc{};
@@ -507,31 +557,6 @@ void LutEngine::EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src)
     device_->CreateShaderResourceView(frameTexture_.Get(), nullptr, frameSrv_.GetAddressOf());
 }
 
-void LutEngine::EnsureWorkingTexture(UINT width, UINT height)
-{
-    if (workingTexture_)
-    {
-        D3D11_TEXTURE2D_DESC current{};
-        workingTexture_->GetDesc(&current);
-        if (current.Width == width && current.Height == height) return;
-    }
-    workingRtv_.Reset();
-    workingSrv_.Reset();
-    workingTexture_.Reset();
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    if (FAILED(device_->CreateTexture2D(&desc, nullptr, workingTexture_.GetAddressOf()))) return;
-    if (FAILED(device_->CreateShaderResourceView(workingTexture_.Get(), nullptr, workingSrv_.GetAddressOf()))) return;
-    device_->CreateRenderTargetView(workingTexture_.Get(), nullptr, workingRtv_.GetAddressOf());
-}
-
 void LutEngine::EnsureSwapChainSize(UINT w, UINT h)
 {
     if ((int)w == width_ && (int)h == height_) return;
@@ -547,18 +572,35 @@ void LutEngine::EnsureSwapChainSize(UINT w, UINT h)
     for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
     if (swapChain_)
         swapChain_->ResizeBuffers(2, w, h, swapChainFormat_, 0);
-    if (hwnd_)
+    // 覆盖层隐藏期间（等待捕获恢复）不要顺手把它显示出来
+    if (hwnd_ && overlayVisible_.load())
         SetWindowPos(hwnd_, HWND_TOPMOST, x_, y_, (int)w, (int)h,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
 }
 
 // ---------------- 渲染循环 ----------------
 
+// 自愈：捕获失效（显示模式/分辨率/色彩空间变化、进出独占全屏、驱动忙）时不再
+// 一次失败就终止渲染线程 —— 那样会留下一个冻结在屏幕上的覆盖层，且滤镜静默失效，
+// 只能等用户动 UI 才恢复。这里改为带退避重试；仍失败就保持覆盖层隐藏、继续等待，
+// 直到捕获恢复（running_ 由 Dispose 控制）。
 void LutEngine::RenderLoop()
 {
     int frameCount = 0;
     while (running_)
     {
+        Trace(L"循环开始");
+        if (!duplication_)
+        {
+            SetOverlayVisible(false);
+            captureOk_ = false;
+            if (!RecoverCaptureWithRetry(5, 500))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
+        }
+
         bool neutralNow = neutral_.load();
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
         ComPtr<IDXGIResource> resource;
@@ -566,6 +608,11 @@ void LutEngine::RenderLoop()
                                                     &frameInfo, resource.GetAddressOf());
         if (SUCCEEDED(hr))
         {
+            if (!captureOk_.exchange(true))
+            {
+                SetOverlayVisible(true);
+                Log::Write(L"LutEngine", L"捕获已恢复");
+            }
             if (resource)
             {
                 ComPtr<ID3D11Texture2D> tex;
@@ -576,7 +623,6 @@ void LutEngine::RenderLoop()
                     tex->GetDesc(&d);
                     EnsureSwapChainSize(d.Width, d.Height);
                     EnsureFrameTexture(tex);
-                    EnsureWorkingTexture(d.Width, d.Height);
 
                     // 输入模式按捕获纹理格式判定（与输出模式相互独立）
                     int newInputMode = 0;
@@ -621,26 +667,46 @@ void LutEngine::RenderLoop()
         }
         else if (hr == kDxgiErrorAccessLost)
         {
-            // 桌面模式/分辨率变化：重建捕获后继续
-            if (!RecoverCapture()) break;
-            // 若输出色彩空间变化（SDR/HDR 切换），交换链格式不再匹配，
-            // 停止本引擎，让上层在下次应用时按新色彩空间重建。
+            // 桌面模式/分辨率/色彩空间变化（含 DSR、HDR 切换、游戏进出全屏）。
+            // 先隐藏覆盖层避免冻结画面，再重建捕获。
+            Log::WriteFmt(L"LutEngine", L"捕获丢失 (0x%08X)，开始重建", (unsigned)hr);
+            SetOverlayVisible(false);
+            captureOk_ = false;
             int oldMode = colorMode_;
+            if (!RecoverCaptureWithRetry(10, 400))
+            {
+                // 仍不可用（例如游戏独占全屏）：保持隐藏并等待，绝不留下死覆盖层
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            // 色彩空间可能已变化：交换链格式与色彩空间声明都要跟着重建
             DetectColorSpace();
             if (colorMode_ != oldMode)
             {
-                LastError = L"显示器色彩空间发生变化，停止 LUT 引擎（下次应用时重建）";
-                Log::Write(L"LutEngine", LastError.c_str());
-                break;
+                Log::WriteFmt(L"LutEngine", L"色彩空间模式 %d -> %d，重建交换链",
+                              oldMode, colorMode_);
+                RebuildSwapChainForColorSpace();
             }
+            UpdateColorModeBuffer();
+            SetOverlayVisible(true);
+            captureOk_ = true;
         }
         else
         {
-            LastError = Format(L"DXGI 捕获错误: 0x%08X", (unsigned)hr);
-            Log::WriteFmt(L"LutEngine", L"RenderLoop exit: %s", LastError.c_str());
-            break;
+            Log::WriteFmt(L"LutEngine", L"DXGI 捕获错误 0x%08X，尝试恢复", (unsigned)hr);
+            SetOverlayVisible(false);
+            captureOk_ = false;
+            duplication_.Reset();
+            if (!RecoverCaptureWithRetry(5, 500))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
+            SetOverlayVisible(true);
+            captureOk_ = true;
         }
     }
+    SetOverlayVisible(false);
     running_ = false;
     Log::Write(L"LutEngine", L"RenderLoop ended");
 }
@@ -661,8 +727,47 @@ bool LutEngine::RecoverCapture()
     return true;
 }
 
+bool LutEngine::RecoverCaptureWithRetry(int attempts, int delayMs)
+{
+    for (int i = 0; i < attempts && running_; i++)
+    {
+        if (RecoverCapture()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+    }
+    return duplication_.Get() != nullptr;
+}
+
+// 显示模式/色彩空间变化后重建交换链：交换链格式与 SetColorSpace1 声明都必须跟着变，
+// 旧实现直接停止引擎并留一个冻结覆盖层（滤镜静默失效），现改为原地重建。
+void LutEngine::RebuildSwapChainForColorSpace()
+{
+    backBufferTex_.Reset();
+    for (auto& slot : backBufferRtv_) { slot.tex.Reset(); slot.rtv.Reset(); }
+    swapChain_.Reset();
+    CreateSwapChain();
+    if (!swapChain_)
+    {
+        LastError = L"色彩空间变化后重建交换链失败";
+        Log::Write(L"LutEngine", LastError.c_str());
+    }
+}
+
 void LutEngine::DrawAndPresent()
 {
+    // 护栏：覆盖层不可见时绝不能 Present —— flip 模型交换链向未显示的窗口呈现会
+    // 永久阻塞等待 DWM 取帧（v2.0.0-beta 卡死根因）。捕获恢复期间窗口是隐藏的。
+    if (!swapChain_) return;
+    if (hwnd_ && !IsWindowVisible(hwnd_))
+    {
+        if (!presentSkipLogged_)
+        {
+            presentSkipLogged_ = true;
+            Log::Write(L"LutEngine", L"覆盖层不可见，暂停呈现（等待恢复）");
+        }
+        return;
+    }
+    presentSkipLogged_ = false;
+
     // 1) 需要重建 LUT？把最新参数拷出并上传，派发计算着色器
     if (paramsDirty_.exchange(false))
     {
@@ -697,12 +802,12 @@ void LutEngine::DrawAndPresent()
     ID3D11RenderTargetView* rtv = GetBackBufferRtv(backBuffer.Get());
     if (!rtv) return;
 
+    // 全屏三角形覆盖全部像素，因此不再需要 ClearRenderTargetView
+    //（旧实现每帧清屏两次 ≈ 44MB 显存流量，1440p@144Hz 纯属浪费）。
     if (neutral_.load())
     {
         // 中性直通：走全屏三角形 + 直通像素着色器。
         // 不直接 CopyResource，因为捕获帧与后缓冲格式可能不一致（HDR/格式切换）。
-        const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
-        context_->ClearRenderTargetView(rtv, clearColor);
         context_->OMSetRenderTargets(1, &rtv, nullptr);
         D3D11_VIEWPORT vp{ 0, 0, (float)width_, (float)height_, 0, 1 };
         context_->RSSetViewports(1, &vp);
@@ -720,8 +825,9 @@ void LutEngine::DrawAndPresent()
     }
     else
     {
-        if (!workingRtv_ || !workingSrv_) return;
-        const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
+        // 单遍合并：捕获帧 →（可选）线性光邻域后处理 → LUT 采样 → 输出色彩空间 → 后缓冲。
+        // 中间纹理（R16G16B16A16_FLOAT）与第二遍 draw 已移除。
+        context_->OMSetRenderTargets(1, &rtv, nullptr);
         D3D11_VIEWPORT vp{ 0, 0, (float)width_, (float)height_, 0, 1 };
         context_->RSSetViewports(1, &vp);
         context_->RSSetState(rasterizer_.Get());
@@ -730,33 +836,20 @@ void LutEngine::DrawAndPresent()
         UINT stride = 24, offset = 0;
         context_->IASetVertexBuffers(0, 1, vertexBuffer_.GetAddressOf(), &stride, &offset);
         context_->VSSetShader(vs_.Get(), nullptr, 0);
-
-        // 第一遍：捕获帧 -> LUT/颜色处理 -> 线性工作空间中间纹理。
-        context_->ClearRenderTargetView(workingRtv_.Get(), clearColor);
-        ID3D11RenderTargetView* workingTarget = workingRtv_.Get();
-        context_->OMSetRenderTargets(1, &workingTarget, nullptr);
         context_->PSSetShader(ps_.Get(), nullptr, 0);
-        context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
-        context_->PSSetShaderResources(0, 1, frameSrv_.GetAddressOf());
-        context_->PSSetShaderResources(1, 1, lutSrv_.GetAddressOf());
-        context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
-        context_->PSSetSamplers(1, 1, lutSampler_.GetAddressOf());
-        context_->Draw(3, 0);
-
-        // 第二遍：后处理入口。当前实现是锐化，后续效果可继续挂在这里。
-        context_->ClearRenderTargetView(rtv, clearColor);
-        context_->OMSetRenderTargets(1, &rtv, nullptr);
-        context_->PSSetShader(psPostProcess_.Get(), nullptr, 0);
         context_->PSSetConstantBuffers(0, 1, paramsBuffer_.GetAddressOf());
         context_->PSSetConstantBuffers(1, 1, psModeBuffer_.GetAddressOf());
-        ID3D11ShaderResourceView* postSrv[] = { workingSrv_.Get(), nullptr };
-        context_->PSSetShaderResources(0, 2, postSrv);
+        ID3D11ShaderResourceView* srvs[] = { frameSrv_.Get(), lutSrv_.Get() };
+        context_->PSSetShaderResources(0, 2, srvs);
         context_->PSSetSamplers(0, 1, inputSampler_.GetAddressOf());
+        context_->PSSetSamplers(1, 1, lutSampler_.GetAddressOf());
         context_->Draw(3, 0);
     }
 
     UINT syncInterval = UseVsync ? 1u : 0u;
+    Trace(L"Present 开始");
     swapChain_->Present(syncInterval, 0);
+    Trace(L"Present 返回");
 }
 
 ID3D11RenderTargetView* LutEngine::GetBackBufferRtv(ID3D11Texture2D* buffer)
@@ -791,12 +884,9 @@ void LutEngine::RenderSelfCheck()
     // 从 back buffer 读回中心像素，黑屏时记录日志
     // 中性参数时覆盖层可能从未呈现过（backBufferTex_ 为空），直接跳过
     if (!backBufferTex_) return;
-    // HDR 后缓冲是 10bit/float，不再按 4 字节 BGRA 假设做自检
-    if (colorMode_ != 0)
-    {
-        Log::WriteFmt(L"LutEngine", L"渲染自检跳过（HDR 输出模式 %d）", colorMode_);
-        return;
-    }
+    // 后缓冲格式随输出色彩空间变化：SDR=BGRA8 / HDR10=R10G10B10A2 / scRGB=RGBA16F。
+    // 三种格式都做非黑校验（旧实现 HDR 直接跳过，等于 HDR 下没有自检）。
+    UINT pxBytes = colorMode_ == 1 ? 4u : (colorMode_ == 2 ? 8u : 4u);
     try
     {
         ComPtr<ID3D11Texture2D> staging;
@@ -811,12 +901,34 @@ void LutEngine::RenderSelfCheck()
         D3D11_MAPPED_SUBRESOURCE map{};
         if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) return;
         int cx = width_ / 2, cy = height_ / 2;
-        const BYTE* px = (const BYTE*)map.pData + (size_t)cy * map.RowPitch + (size_t)cx * 4;
-        BYTE b = px[0], g = px[1], r = px[2], a = px[3];
+        const BYTE* px = (const BYTE*)map.pData + (size_t)cy * map.RowPitch + (size_t)cx * pxBytes;
+        bool visible = false;
+        std::wstring detail;
+        if (colorMode_ == 0)
+        {
+            BYTE b = px[0], g = px[1], r = px[2], a = px[3];
+            visible = (r | g | b) > 8;
+            detail = Format(L"R=%u G=%u B=%u A=%u", r, g, b, a);
+        }
+        else if (colorMode_ == 1)
+        {
+            // R10G10B10A2_UNORM 小端：低 10 位为 R
+            DWORD v = 0;
+            memcpy(&v, px, 4);
+            unsigned r = v & 0x3FF, g = (v >> 10) & 0x3FF, b = (v >> 20) & 0x3FF;
+            visible = (r | g | b) > 4;
+            detail = Format(L"R10=%u G10=%u B10=%u", r, g, b);
+        }
+        else
+        {
+            unsigned acc = 0;
+            for (UINT i = 0; i < 8; i++) acc |= px[i];
+            visible = acc > 0;
+            detail = Format(L"RGBA16F 首像素非零=%d", visible ? 1 : 0);
+        }
         context_->Unmap(staging.Get(), 0);
-        bool visible = (r | g | b) > 8;
-        Log::WriteFmt(L"LutEngine", L"渲染自检: 中心像素 R=%u G=%u B=%u A=%u -> %s",
-                      r, g, b, a, visible ? L"画面正常" : L"画面全黑!");
+        Log::WriteFmt(L"LutEngine", L"渲染自检(模式%d): 中心像素 %s -> %s",
+                      colorMode_, detail.c_str(), visible ? L"画面正常" : L"画面全黑!");
     }
     catch (...)
     {
@@ -835,16 +947,12 @@ void LutEngine::ReleaseAll()
     lutTexture_.Reset();
     frameSrv_.Reset();
     frameTexture_.Reset();
-    workingRtv_.Reset();
-    workingSrv_.Reset();
-    workingTexture_.Reset();
     paramsBuffer_.Reset();
     psModeBuffer_.Reset();
     vertexBuffer_.Reset();
     rasterizer_.Reset();
     inputLayout_.Reset();
     ps_.Reset();
-    psPostProcess_.Reset();
     psPassthrough_.Reset();
     vs_.Reset();
     cs_.Reset();
@@ -864,7 +972,9 @@ void LutEngine::Dispose()
     Log::Write(L"LutEngine", L"Dispose begin");
     if (renderThread_.joinable())
     {
+        Trace(L"等待渲染线程退出");
         renderThread_.join();
+        Trace(L"渲染线程已退出");
     }
     ReleaseAll();
     if (hwnd_)

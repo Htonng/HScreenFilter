@@ -93,6 +93,8 @@ static HHOOK g_captureHook = nullptr;
 
 static bool g_trayAdded = false;
 static bool g_exitRequested = false;
+static UINT g_taskbarCreatedMsg = 0;   // explorer 重启通知（RegisterWindowMessage）
+static constexpr UINT_PTR kTimerWatchdog = 3;   // 引擎看门狗定时器
 
 static std::vector<std::function<void()>> g_uiQueue;
 static std::mutex g_uiMutex;
@@ -213,7 +215,11 @@ static std::wstring EngineStatusText()
 {
     switch (FilterEngine::Instance().Kind())
     {
-    case EngineKind::PixelShader: return L"滤镜引擎：LUT 逐像素引擎";
+    case EngineKind::PixelShader:
+        // 覆盖层因拿不到画面而暂停时明确告知（独占全屏/显示模式切换中）
+        return FilterEngine::Instance().OverlayPaused()
+            ? L"滤镜引擎：LUT 逐像素引擎（覆盖层暂停：独占全屏或显示模式切换中，恢复后自动继续）"
+            : L"滤镜引擎：LUT 逐像素引擎";
     case EngineKind::FullScreenColorEffect: return L"滤镜引擎：全屏颜色效果";
     case EngineKind::GammaRamp: return L"滤镜引擎：显卡伽马曲线";
     default: return L"滤镜引擎不可用：" + FilterEngine::Instance().LastError();
@@ -730,8 +736,33 @@ static void ShowTrayMenu()
 
 static void ShowWindowApp(bool show)
 {
-    ShowWindow(g_hwnd, show ? SW_SHOW : SW_HIDE);
-    if (show) { SetForegroundWindow(g_hwnd); }
+    if (!show)
+    {
+        ShowWindow(g_hwnd, SW_HIDE);
+        return;
+    }
+
+    // 可靠还原：旧实现只用 SW_SHOW —— 对最小化的窗口不会还原，且后台进程调用
+    // SetForegroundWindow 常被前台锁拒绝，窗口会弹在其他窗口后面，看起来"双击没反应"。
+    bool wasIconic = IsIconic(g_hwnd) != FALSE;
+    bool wasVisible = IsWindowVisible(g_hwnd) != FALSE;
+    if (wasIconic) ShowWindow(g_hwnd, SW_RESTORE);
+    else if (!wasVisible) ShowWindow(g_hwnd, SW_SHOWNA);
+    else ShowWindow(g_hwnd, SW_SHOW);
+    SetWindowPos(g_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    if (!SetForegroundWindow(g_hwnd))
+    {
+        // 前台锁拒绝：用 TOPMOST 抖动强行置顶，并闪任务栏提示，保证用户能看到窗口
+        SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        FLASHWINFO fi{};
+        fi.cbSize = sizeof(fi);
+        fi.hwnd = g_hwnd;
+        fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+        FlashWindowEx(&fi);
+    }
+    Log(L"[tray] 显示主窗口: 之前最小化=%d 之前隐藏=%d 前台=%d",
+        wasIconic ? 1 : 0, wasVisible ? 0 : 1, GetForegroundWindow() == g_hwnd ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,6 +1300,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_APP + 1: DrainUiQueue(); return 0;
+    case WM_DISPLAYCHANGE:
+        // 分辨率 / DSR / HDR 切换后重新枚举显示器并重新应用：覆盖层几何与交换链
+        // 跟着新分辨率走，避免滤镜作用在错误的区域或旧尺寸上。
+        Log(L"[display] WM_DISPLAYCHANGE %dx%d", (int)LOWORD(lp), (int)HIWORD(lp));
+        InitializeDisplays();
+        ApplyCurrent();
+        SendState(L"sync");
+        return 0;
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED && data_.MinimizeToTray)
         {
@@ -1278,6 +1317,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else ResizeWebView();
         return 0;
     case WM_TIMER:
+        if (wp == kTimerWatchdog)
+        {
+            // 引擎看门狗：LUT 引擎静默死亡 / 伽马表被系统重置时自动恢复
+            if (FilterEngine::Instance().Watchdog())
+            {
+                Log(L"[watchdog] 检测到引擎失效，已自动重建");
+                SendState(L"sync");
+            }
+            return 0;
+        }
 #ifdef HSF_DEBUG
         if (wp == 1) { KillTimer(hwnd, 1); SavePreview(); }
         else if (wp == 2) { KillTimer(hwnd, 2); RunTestScript(); }
@@ -1360,10 +1409,30 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     g_logPath = ExeDir() + L"\\HScreenFilter.log";
-    Log(L"=== HScreenFilter %s start ===", kVersionString);
+    Log(L"=== HScreenFilter %s start (build %s) ===",
+        kVersionString, Utf8ToWide(__DATE__ " " __TIME__).c_str());
+
+    // 命令行开关：--capturable / --no-capturable 临时覆盖"允许捕获"（不写回配置）。
+    // 用途：排查 NVIDIA 录制（ShadowPlay/即时重放）与覆盖层捕获亲和性的相互影响。
+    bool cliCapturable = false, cliNoCapturable = false;
+    {
+        int argc = 0;
+        LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv)
+        {
+            for (int i = 1; i < argc; i++)
+            {
+                if (_wcsicmp(argv[i], L"--capturable") == 0) cliCapturable = true;
+                else if (_wcsicmp(argv[i], L"--no-capturable") == 0) cliNoCapturable = true;
+            }
+            LocalFree(argv);
+        }
+    }
 
     // 数据 + 引擎
     data_ = g_store.Load();
+    if (cliCapturable) data_.Captureable = true;
+    if (cliNoCapturable) data_.Captureable = false;
     InitializeDisplays();
     savedSnapshot_ = CurDisplay().Current.Clone();
     savedUseDxgi_ = data_.UseDxgi;
@@ -1372,9 +1441,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     FilterEngine::Instance().SetUseDxgi(data_.UseDxgi);
     FilterEngine::Instance().Initialize();
     FilterEngine::Instance().SetOverlayCapturable(data_.Captureable);
-    Log(L"[data] profiles=%d bindings=%d displays=%d useDxgi=%d engine=%d",
+    Log(L"[data] profiles=%d bindings=%d displays=%d useDxgi=%d engine=%d capturable=%d%s",
         (int)data_.Profiles.size(), (int)data_.AppBindings.size(), (int)data_.Displays.size(),
-        data_.UseDxgi ? 1 : 0, (int)FilterEngine::Instance().Kind());
+        data_.UseDxgi ? 1 : 0, (int)FilterEngine::Instance().Kind(),
+        data_.Captureable ? 1 : 0,
+        (cliCapturable || cliNoCapturable) ? L"（命令行覆盖）" : L"");
     ApplyCurrent();
 
     // 后台消息窗口 + 热键
@@ -1399,6 +1470,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                 InvokeUi([]() { ShowTrayMenu(); });
             else if (LOWORD(lp) == WM_LBUTTONDBLCLK)
                 InvokeUi([]() { ShowWindowApp(true); });
+        }
+        else if (g_taskbarCreatedMsg != 0 && m == g_taskbarCreatedMsg)
+        {
+            // explorer 重启后托盘图标会被系统清掉且不会自动恢复 —— 不重新添加的话，
+            // 之后点托盘（含双击）永远没有反应。
+            Log(L"[tray] 收到 TaskbarCreated，重新添加托盘图标");
+            RemoveTray();
+            AddTray();
         }
     });
 
@@ -1471,8 +1550,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     if (!startHidden) ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
+    // explorer 重启通知：注册后才能在托盘图标被系统清掉时重新添加
+    g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+
     InitWebView2(userData);
     AddTray();
+
+    // 引擎看门狗：每 5 秒检查一次 LUT 引擎/伽马曲线是否被系统或驱动重置
+    SetTimer(hwnd, kTimerWatchdog, 5000, nullptr);
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }

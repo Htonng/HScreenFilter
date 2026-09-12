@@ -10,15 +10,55 @@ struct VSOutput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 VSOutput main(VSInput i) { VSOutput o; o.pos = i.pos; o.uv = i.uv; return o; }
 )HLSL";
 
-// ---------------- 像素着色器：LUT 采样，输出线性工作空间 ----------------
+// ---------------- 像素着色器：单遍合并（LUT + 可选线性光后处理） ----------------
 // 输入先转到 sRGB 工作空间做 LUT，再转到输出色彩空间。
 // InputMode / OutputMode：0 sRGB / 1 HDR10 PQ / 2 scRGB 线性。
 // 转换带 SDR 白点缩放（scRGB 1.0 = 80nit；HDR10 PQ 满量程 = 10000nit）。
+//
+// 单遍合并（性能修复）：
+//   旧实现是两遍 —— 第一遍做 LUT 并把结果写进 R16G16B16A16_FLOAT 中间纹理，
+//   第二遍读该中间纹理做 12-tap 邻域后处理再写后缓冲；另加两次全屏清屏。
+//   1440p 每帧仅中间纹理的写/读/清屏就约 90MB 显存流量，是 low 帧下降的主因之一。
+//   现在合并为一遍：捕获纹理 → （可选）线性光邻域后处理 → LUT 一次采样 → 输出色彩空间
+//   → 后缓冲，全程无中间纹理、无清屏、仅一次全屏 draw。
+//   PostActive=0（五项后处理参数全为 0）时走快路径：只做 1 次输入采样 + 1 次 LUT 采样，
+//   输出与旧两遍实现的恒等路径完全一致。
+//   语义差异：后处理由「LUT 之后再锐化」变为「锐化之后再套 LUT」（细节先于 LUT 生效，
+//   避免强 LUT 曲线把锐化过冲放大）。
 const char* g_psLutSource = R"HLSL(
 Texture2D InputTexture : register(t0);
 SamplerState InputSampler : register(s0);
 Texture3D LutTexture : register(t1);
 SamplerState LutSampler : register(s1);
+
+cbuffer Params : register(b0)
+{
+    float MasterHue;
+    float MasterSat;
+    float MasterLight;
+    float GlobalSat;
+    float Temperature;
+    float Contrast;
+    float Brightness;
+    float Highlights;
+    float Shadows;
+    float HueR, SatR, LightR;
+    float HueO, SatO, LightO;
+    float HueY, SatY, LightY;
+    float HueG, SatG, LightG;
+    float HueC, SatC, LightC;
+    float HueB, SatB, LightB;
+    float HueP, SatP, LightP;
+    float HueM, SatM, LightM;
+    float Sharpen;
+    float NoiseReduction;
+    float EdgeEnhancement;
+    float Clarity;
+    float QualityEnhancement;
+    float TexelX;
+    float TexelY;
+    float PostActive;
+};
 
 cbuffer ColorSpace : register(b1)
 {
@@ -29,6 +69,7 @@ cbuffer ColorSpace : register(b1)
 
 static const float LUT_N = 64.0;
 static const float SDR_TO_HDR = 80.0 / 10000.0;
+static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 float DitherNoise(float2 p)
 {
@@ -99,129 +140,46 @@ float3 SrgbWorkingToOutput(float3 srgb)
 
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 {
-    float4 color = InputTexture.Sample(InputSampler, uv);
-    float3 rgb = InputToSrgbWorking(color.rgb);
+    float3 work = InputToSrgbWorking(InputTexture.Sample(InputSampler, uv).rgb);
+
+    // 可选：线性光空间邻域后处理（数学与原第二遍一致，数据源改为捕获纹理，中间纹理已移除）
+    if (PostActive > 0.5)
+    {
+        float2 tx = float2(TexelX, 0.0);
+        float2 ty = float2(0.0, TexelY);
+        float3 center = SrgbToLinear(work);
+        float3 neighbors =
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - tx).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + tx).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - ty).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + ty).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - tx - ty).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - tx + ty).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + tx - ty).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + tx + ty).rgb));
+        float3 average = neighbors / 8.0;
+        float3 denoised = lerp(center, average, NoiseReduction);
+        float3 detail = denoised - average;
+        float3 enhanced = denoised + detail * (Sharpen + EdgeEnhancement * 0.8);
+
+        float2 wideTx = tx * 2.0;
+        float2 wideTy = ty * 2.0;
+        float3 wideAverage = (
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - wideTx).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + wideTx).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv - wideTy).rgb)) +
+            SrgbToLinear(InputToSrgbWorking(InputTexture.Sample(InputSampler, uv + wideTy).rgb))) / 4.0;
+        enhanced += (enhanced - wideAverage) * Clarity * 0.7;
+
+        float luminance = dot(enhanced, LUMA);
+        float3 quality = (enhanced - luminance) * (1.0 + QualityEnhancement * 0.35) + luminance;
+        work = LinearToSrgb(max(lerp(enhanced, quality, QualityEnhancement), 0.0));
+    }
 
     // 把 sRGB 值映射到 LUT 纹理坐标：texel i 代表值 i/(N-1)
-    float3 u = (rgb * (LUT_N - 1.0) + 0.5) / LUT_N;
-    float3 outRgb = LutTexture.Sample(LutSampler, u).rgb;
-    return float4(SrgbToLinear(outRgb), 1.0);
-}
-)HLSL";
-
-// ---------------- 像素着色器：后处理（3x3 锐化 + 最终输出） ----------------
-const char* g_psPostProcessSource = R"HLSL(
-Texture2D WorkingTexture : register(t0);
-SamplerState WorkingSampler : register(s0);
-
-cbuffer Params : register(b0)
-{
-    float MasterHue;
-    float MasterSat;
-    float MasterLight;
-    float GlobalSat;
-    float Temperature;
-    float Contrast;
-    float Brightness;
-    float Highlights;
-    float Shadows;
-    float HueR, SatR, LightR;
-    float HueO, SatO, LightO;
-    float HueY, SatY, LightY;
-    float HueG, SatG, LightG;
-    float HueC, SatC, LightC;
-    float HueB, SatB, LightB;
-    float HueP, SatP, LightP;
-    float HueM, SatM, LightM;
-    float Sharpen;
-    float NoiseReduction;
-    float EdgeEnhancement;
-    float Clarity;
-    float QualityEnhancement;
-    float TexelX;
-    float TexelY;
-};
-
-cbuffer ColorSpace : register(b1)
-{
-    uint InputMode;
-    uint OutputMode;
-    float2 Pad;
-};
-
-static const float SDR_TO_HDR = 80.0 / 10000.0;
-
-float DitherNoise(float2 p)
-{
-    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-}
-
-float3 SrgbToLinear(float3 c)
-{
-    float3 lo = c / 12.92;
-    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
-    return lerp(lo, hi, step(0.04045, c));
-}
-
-float3 LinearToSrgb(float3 c)
-{
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
-    return lerp(lo, hi, step(0.0031308, c));
-}
-
-float3 LinearToPq(float3 lin)
-{
-    const float m1 = 0.1593017578125;
-    const float m2 = 78.84375;
-    const float c1 = 0.8359375;
-    const float c2 = 18.8515625;
-    const float c3 = 18.6875;
-    lin = max(lin, 0.0);
-    float3 y = pow(max(lin, 1e-8), m1);
-    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
-}
-
-float3 LinearToOutput(float3 lin)
-{
-    if (OutputMode == 1)
-        return LinearToPq(max(lin, 0.0) * SDR_TO_HDR);
-    if (OutputMode == 2)
-        return lin;
-    return LinearToSrgb(saturate(lin));
-}
-
-float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
-{
-    float2 tx = float2(TexelX, 0.0);
-    float2 ty = float2(0.0, TexelY);
-    float3 center = WorkingTexture.Sample(WorkingSampler, uv).rgb;
-    float3 neighbors =
-        WorkingTexture.Sample(WorkingSampler, uv - tx).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + tx).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv - ty).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + ty).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv - tx - ty).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv - tx + ty).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + tx - ty).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + tx + ty).rgb;
-    float3 average = neighbors / 8.0;
-    float3 denoised = lerp(center, average, NoiseReduction);
-    float3 detail = denoised - average;
-    float3 enhanced = denoised + detail * (Sharpen + EdgeEnhancement * 0.8);
-    float2 wideTx = tx * 2.0;
-    float2 wideTy = ty * 2.0;
-    float3 wideAverage = (
-        WorkingTexture.Sample(WorkingSampler, uv - wideTx).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + wideTx).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv - wideTy).rgb +
-        WorkingTexture.Sample(WorkingSampler, uv + wideTy).rgb) / 4.0;
-    float3 clarityDetail = enhanced - wideAverage;
-    enhanced += clarityDetail * Clarity * 0.7;
-    float luminance = dot(enhanced, float3(0.2126, 0.7152, 0.0722));
-    float3 quality = (enhanced - luminance) * (1.0 + QualityEnhancement * 0.35) + luminance;
-    float3 sharpened = lerp(enhanced, quality, QualityEnhancement);
-    float3 outRgb = LinearToOutput(max(sharpened, 0.0));
+    float3 u = (saturate(work) * (LUT_N - 1.0) + 0.5) / LUT_N;
+    float3 lutted = LutTexture.Sample(LutSampler, u).rgb;
+    float3 outRgb = SrgbWorkingToOutput(lutted);
 
     // 仅 SDR 下抖动；HDR PQ/scRGB 空间抖动会在量化处丢失。
     if (OutputMode == 0)

@@ -41,14 +41,26 @@ public:
     // 仅改标志位不会生效）
     void ApplyOverlayAffinity();
 
+    // 显示/隐藏覆盖层：捕获不可用期间必须隐藏（否则屏幕冻结最后一帧）。
+    // 已内置护栏：隐藏期间 DrawAndPresent 不会呈现（flip 交换链向隐藏窗口呈现会永久阻塞）。
+    void SetOverlayVisible(bool visible);
+    // 覆盖层当前是否可见（捕获不可用时会被隐藏，避免残留冻结画面）
+    bool OverlayVisible() const { return overlayVisible_.load(); }
+    // 捕获是否正常（false = 正在等待恢复，例如游戏独占全屏/显示模式切换中）
+    bool CaptureOk() const { return captureOk_.load(); }
+
 private:
     void RenderLoop();
     bool RecoverCapture();
+    // 捕获失效后的自愈：带退避重试若干次（不再一次失败就终止渲染线程）
+    bool RecoverCaptureWithRetry(int attempts, int delayMs);
     void DrawAndPresent();
     void RebuildLutIfNeeded();
     void RenderSelfCheck();
     void CreateOverlayWindow();
     void CreateSwapChain();
+    // 显示模式/色彩空间变化后重建交换链（格式与色彩空间声明都要跟着变）
+    void RebuildSwapChainForColorSpace();
     bool CreatePipeline();
     bool CreateDevice();
     // 按显示器坐标（而非索引）查找 DXGI 输出：EnumDisplayMonitors 顺序与
@@ -64,7 +76,6 @@ private:
     ID3D11RenderTargetView* GetBackBufferRtv(ID3D11Texture2D* buffer);
     // 分辨率变化后重建帧纹理/交换链（防止 CopyResource 失败 → 黑屏/花屏）
     void EnsureFrameTexture(const ComPtr<ID3D11Texture2D>& src);
-    void EnsureWorkingTexture(UINT width, UINT height);
     void EnsureSwapChainSize(UINT w, UINT h);
     bool EnsureShaders();
     void ReleaseAll();
@@ -83,7 +94,6 @@ private:
     BackBufferRtv backBufferRtv_[3];
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> ps_;
-    ComPtr<ID3D11PixelShader> psPostProcess_;
     ComPtr<ID3D11PixelShader> psPassthrough_;
     ComPtr<ID3D11ComputeShader> cs_;
     ComPtr<ID3D11InputLayout> inputLayout_;
@@ -93,9 +103,6 @@ private:
     ComPtr<ID3D11Buffer> psModeBuffer_;   // 像素着色器色彩空间模式（b1）
     ComPtr<ID3D11Texture2D> frameTexture_;
     ComPtr<ID3D11ShaderResourceView> frameSrv_;
-    ComPtr<ID3D11Texture2D> workingTexture_;
-    ComPtr<ID3D11ShaderResourceView> workingSrv_;
-    ComPtr<ID3D11RenderTargetView> workingRtv_;
     ComPtr<ID3D11Texture2D> backBufferTex_;   // 当前后缓冲（渲染自检读回用）
     ComPtr<ID3D11Texture3D> lutTexture_;
     ComPtr<ID3D11ShaderResourceView> lutSrv_;
@@ -114,11 +121,15 @@ private:
 
     // 自检只做一次（原来每 30 帧整屏读回 → GPU 停顿 → 卡顿）
     bool selfChecked_ = false;
+    // "覆盖层不可见 → 暂停呈现"只记一条日志（避免刷屏）
+    bool presentSkipLogged_ = false;
 
     // 线程与状态
     std::thread renderThread_;
     std::atomic<bool> running_{ false };
     std::atomic<bool> disposed_{ false };
+    std::atomic<bool> overlayVisible_{ true };
+    std::atomic<bool> captureOk_{ true };
     std::mutex paramsMutex_;
     float params_[kParamsFloatCount] = {};
     float paramsCopy_[kParamsFloatCount] = {};

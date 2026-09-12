@@ -1,4 +1,4 @@
-# HScreenFilter 屏幕滤镜 · v2.1.0
+# HScreenFilter 屏幕滤镜 · v2.1.1
 
 **WebView2 桥接版**：C++17 滤镜引擎 + Flat Design 网页 UI（Edge WebView2 承载），
 滑块/开关实时驱动真实的滤镜引擎（3D LUT 逐像素 / 放大镜 / 伽马），数据与旧版完全兼容。
@@ -35,10 +35,13 @@
 
 ## 🛠️ 技术要点
 
-- **引擎**：64³ 3D LUT 管线（cs_5_0 计算着色器并行生成 LUT + 第一遍像素着色器三线性采样 + 第二遍后处理像素着色器），
+- **引擎**：64³ 3D LUT 管线（cs_5_0 计算着色器并行生成 LUT + 单遍像素着色器三线性采样），
   HSL 软掩码 → OKLab 感知空间 → 暗部衰减，与旧版逐行一致；
-  中间浮点纹理承载线性工作空间，后处理阶段提供锐化（Unsharp Mask）、降噪、边缘增强、清晰度与画质增强，便于继续扩展更多效果；
+  单遍内联做线性光邻域后处理（锐化 Unsharp Mask、降噪、边缘增强、清晰度、画质增强），
+  无中间浮点纹理与全屏清屏，五项后处理全为 0 时走 `PostActive` 快路径（1 次输入采样 + 1 次 LUT 采样）；
   引擎回退链：LUT 逐像素 → 放大镜颜色矩阵 → 显卡伽马曲线。
+- **自愈**：捕获失效（显示模式切换 / 独占全屏 / DSR）带退避重试并自动隐藏覆盖层，恢复后继续渲染；
+  5 秒看门狗重建已停止的引擎、重设被驱动重置的伽马曲线。
 - **UI**：WebView2 承载 webui2（HTML/CSS/JS，Flat Design），
   宿主 ↔ 页面通过 `PostWebMessageAsJson` / `postMessage` 双向桥接完整状态；
   滑块范围/预设/保存语义与原版严格一致。
@@ -50,14 +53,14 @@
 
 ```powershell
 .\build.ps1                  # 主程序（C++ 原生版，输出 build\HScreenFilter.exe）
-.\build-release.ps1          # v2.1.0 发布版（输出 dist\HScreenFilter-v2.1.0\ + zip）
+.\build-release.ps1          # v2.1.1 发布版（输出 dist\HScreenFilter-v2.1.1\ + zip）
 ```
 
 ## 🚀 运行
 
 ```powershell
 .\build\HScreenFilter.exe --selftest   # 主程序自检
-dist\HScreenFilter-v2.1.0\HScreenFilter.exe   # 发布版（需系统已装 WebView2 Runtime）
+dist\HScreenFilter-v2.1.1\HScreenFilter.exe   # 发布版（需系统已装 WebView2 Runtime）
 ```
 
 ## 📁 源码结构

@@ -77,6 +77,25 @@ bool GammaEngine::Apply(const FilterSettings& s)
     return ok;
 }
 
+bool GammaEngine::ApplyIfChanged(const FilterSettings& s)
+{
+    Ramp want = BuildRamp(s);
+    Ramp now{};
+    HDC hdc = ScreenDC();
+    if (!hdc) return false;
+    bool same = false;
+    if (GetDeviceGammaRamp(hdc, &now))
+        same = memcmp(&want, &now, sizeof(Ramp)) == 0;
+    if (same)
+    {
+        ReleaseDC(nullptr, hdc);
+        return true;
+    }
+    bool ok = SetDeviceGammaRamp(hdc, &want) != FALSE;
+    ReleaseDC(nullptr, hdc);
+    return ok;
+}
+
 bool GammaEngine::Reset()
 {
     Ramp r = LinearRamp();

@@ -107,6 +107,8 @@ void FilterEngine::StopAll()
         if (kv.second) kv.second->Dispose();
     }
     lutEngines_.clear();
+    appliedByDisplay_.clear();
+    gammaApplied_ = false;
     if (magUsed_)
     {
         mag_.Reset();
@@ -161,6 +163,7 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
         if (engine)
         {
             engine->Apply(s);
+            appliedByDisplay_[displayIndex] = AppliedState{ display, s };
             return true;
         }
     }
@@ -186,7 +189,11 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
         {
             gammaSaturationWarned_ = false;
         }
-        return GammaEngine::Apply(s);
+        // 记录最后一次伽马参数：显示模式切换会把伽马表重置为线性，看门狗需要据此恢复
+        bool ok = GammaEngine::Apply(s);
+        lastGammaSettings_ = s;
+        gammaApplied_ = ok;
+        return ok;
     }
     return false;
 }
@@ -201,6 +208,7 @@ bool FilterEngine::Reset()
         if (kv.second) kv.second->Dispose();
     }
     lutEngines_.clear();
+    appliedByDisplay_.clear();
     // 放大镜：仅当本应用初始化过才复位
     if (magUsed_)
     {
@@ -210,6 +218,7 @@ bool FilterEngine::Reset()
     if (kind_ == EngineKind::GammaRamp)
     {
         ok = GammaEngine::Reset() && ok;
+        gammaApplied_ = false;
     }
     return ok;
 }
@@ -217,6 +226,7 @@ bool FilterEngine::Reset()
 void FilterEngine::ResetDisplay(int displayIndex)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    appliedByDisplay_.erase(displayIndex);
     if (kind_ != EngineKind::PixelShader) return;
     auto it = lutEngines_.find(displayIndex);
     if (it != lutEngines_.end())
@@ -224,6 +234,77 @@ void FilterEngine::ResetDisplay(int displayIndex)
         it->second->Dispose();
         lutEngines_.erase(it);
     }
+}
+
+// 临时显示/隐藏滤镜覆盖层（供界面/诊断使用；隐藏期间引擎不呈现，避免冻结画面）
+void FilterEngine::SetOverlayVisible(bool visible)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& kv : lutEngines_)
+    {
+        if (kv.second) kv.second->SetOverlayVisible(visible);
+    }
+}
+
+// 覆盖层是否处于"暂停显示"状态（引擎还活着，但暂时拿不到画面）
+bool FilterEngine::OverlayPaused()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& kv : lutEngines_)
+        if (kv.second && kv.second->IsRendering() && !kv.second->OverlayVisible()) return true;
+    return false;
+}
+
+// 看门狗：把"引擎静默死亡"变成"自动重建"。
+// 旧实现里 LutEngine 的渲染线程一旦结束，覆盖层会停在屏幕上冻结最后一帧，
+// 滤镜静默失效，只有用户动 UI/切换前台应用才会重建 —— 这正是"某个操作后滤镜就没了"
+// 和"屏幕发暗/画面冻住"的来源。
+bool FilterEngine::Watchdog()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!InitializeLocked()) return false;
+
+    if (kind_ == EngineKind::PixelShader)
+    {
+        bool rebuilt = false;
+        for (auto& kv : appliedByDisplay_)
+        {
+            int index = kv.first;
+            const AppliedState& st = kv.second;
+            auto it = lutEngines_.find(index);
+            if (it != lutEngines_.end() && it->second && it->second->IsRendering()) continue;
+
+            Log::WriteFmt(L"FilterEngine", L"看门狗：显示器 %d 的 LUT 引擎已停止，自动重建", index);
+            if (it != lutEngines_.end())
+            {
+                if (it->second) it->second->Dispose();
+                lutEngines_.erase(it);
+            }
+            auto eng = std::make_unique<LutEngine>();
+            if (!eng->Start(st.Display.X, st.Display.Y, st.Display.Width, st.Display.Height, index))
+            {
+                Log::WriteFmt(L"FilterEngine", L"看门狗：重建失败：%s", eng->LastError.c_str());
+                continue;
+            }
+            auto vi = vsyncByDisplay_.find(index);
+            if (vi != vsyncByDisplay_.end()) eng->UseVsync = vi->second;
+            eng->Capturable = capturable_;
+            eng->ApplyOverlayAffinity();
+            eng->Apply(st.Settings);
+            lutEngines_[index] = std::move(eng);
+            rebuilt = true;
+        }
+        return rebuilt;
+    }
+
+    if (kind_ == EngineKind::GammaRamp && gammaApplied_)
+    {
+        // 显示模式切换/游戏进出全屏会由驱动重置伽马表 → 检测不一致才重设（一致时零动作）
+        if (!GammaEngine::ApplyIfChanged(lastGammaSettings_))
+            Log::Write(L"FilterEngine", L"看门狗：伽马曲线被系统重置，重设失败");
+        return false;
+    }
+    return false;
 }
 
 void FilterEngine::SetOverlayCapturable(bool capturable)

@@ -10,9 +10,28 @@
 
 namespace hsf {
 
+// 边等边抽消息：引擎测试期间主线程也要泵消息。
+// 原因：覆盖层窗口属于主线程，其显示/隐藏是异步投递到主线程的 —— 主线程若是死睡，
+// 显示状态不会真正改变，隐藏/恢复路径就测不到（真机上 UI 线程一直在泵消息）。
+static void PumpSleep(int ms)
+{
+    DWORD start = GetTickCount();
+    MSG msg;
+    while ((int)(GetTickCount() - start) < ms)
+    {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(10);
+    }
+}
+
 // 引擎测试：启动 DXGI LUT 引擎 → 应用非中性滤镜 → 短暂运行 → 关闭。
 // 用于验证覆盖层/DXGI 捕获/LUT 重建/呈现 全链路（会在当前显示器短暂应用滤镜）。
-static int RunEngineTest()
+// 可用 --enginetest=秒数 延长运行时间（排查隐藏/恢复、Present 阻塞等问题时够用）。
+static int RunEngineTest(int seconds = 4, bool overlayCycle = false)
 {
     FILE* logf = _wfopen((ExeDir() + L"\\enginetest.log").c_str(), L"w, ccs=UTF-8");
     auto out = [logf](const std::wstring& line) {
@@ -49,8 +68,26 @@ static int RunEngineTest()
     }
     out(L"[ OK ] 引擎已应用（LUT 覆盖层启动）");
 
-    // 运行 4 秒（渲染线程重建 LUT 并呈现）
-    Sleep(4000);
+    // 运行指定秒数（渲染线程重建 LUT 并呈现）
+    PumpSleep(seconds * 1000);
+
+    // 覆盖层隐藏/恢复回归测试：捕获中断期间覆盖层会被隐藏，必须验证
+    // 「隐藏时不呈现（flip 交换链不阻塞）」且「恢复后继续呈现」。
+    if (overlayCycle)
+    {
+        out(L"[TEST] 隐藏覆盖层 3 秒（模拟捕获中断），期间改参数强制请求重绘...");
+        fe.SetOverlayVisible(false);
+        // 改参数会置 paramsDirty_：静态桌面下渲染线程也会调用 DrawAndPresent，
+        // 正好覆盖「隐藏期间尝试呈现」这条最危险的路径（旧实现会永久阻塞在 Present）。
+        FilterSettings s2 = s;
+        s2.Brightness = 30;
+        fe.Apply(0, monitors[0], s2);
+        PumpSleep(3000);
+        out(L"[TEST] 恢复显示覆盖层 2 秒...");
+        fe.SetOverlayVisible(true);
+        PumpSleep(2000);
+        out(L"[ OK ] 覆盖层隐藏/恢复未阻塞引擎");
+    }
 
     fe.Reset();
     fe.Shutdown();
@@ -161,16 +198,16 @@ static int RunSelfTest()
         }
         else
         {
-            out(L"[ OK ] 像素着色器编译成功 (ps_4_0)");
+            out(L"[ OK ] 单遍合并像素着色器编译成功 (ps_4_0)");
         }
-        if (!CompileShader(g_psPostProcessSource, "main", "ps_4_0", blob, err))
+        if (!CompileShader(g_psPassthroughSource, "main", "ps_4_0", blob, err))
         {
-            out(L"[FAIL] 后处理像素着色器编译失败: " + err);
+            out(L"[FAIL] 直通像素着色器编译失败: " + err);
             fails++;
         }
         else
         {
-            out(L"[ OK ] 后处理像素着色器编译成功 (ps_4_0)");
+            out(L"[ OK ] 直通像素着色器编译成功 (ps_4_0)");
         }
         if (!CompileShader(g_csLutSource, "CSMain", "cs_5_0", blob, err))
         {
@@ -295,12 +332,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool selftest = false;
     bool enginetest = false;
+    bool engineTestCycle = false;
+    int engineTestSeconds = 4;
     if (argv)
     {
         for (int i = 1; i < argc; i++)
         {
             if (_wcsicmp(argv[i], L"--selftest") == 0) selftest = true;
             if (_wcsicmp(argv[i], L"--enginetest") == 0) enginetest = true;
+            // --enginetest-cycle：额外做一次覆盖层隐藏/恢复回归（验证不阻塞 Present）
+            if (_wcsicmp(argv[i], L"--enginetest-cycle") == 0)
+            {
+                enginetest = true;
+                engineTestCycle = true;
+            }
+            // --enginetest=秒数：延长引擎测试运行时间（排查卡顿/隐藏恢复时用）
+            if (_wcsnicmp(argv[i], L"--enginetest=", 13) == 0)
+            {
+                int sec = _wtoi(argv[i] + 13);
+                if (sec > 0 && sec <= 3600)
+                {
+                    enginetest = true;
+                    engineTestSeconds = sec;
+                }
+            }
         }
         LocalFree(argv);
     }
@@ -313,7 +368,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     }
     if (enginetest)
     {
-        int rc = RunEngineTest();
+        int rc = RunEngineTest(engineTestSeconds, engineTestCycle);
         CloseHandle(mutex);
         return rc;
     }

@@ -13,6 +13,10 @@ public:
 
     static bool Test();
     static bool Apply(const FilterSettings& s);
+    // 只在当前伽马表与我们期望的不一致时才重设。
+    // 用途：任何显示模式切换（分辨率/HDR/游戏进出全屏/DSR）都会由驱动把伽马表
+    // 重置为线性，导致滤镜"静默失效"；看门狗用这个接口低成本地恢复。
+    static bool ApplyIfChanged(const FilterSettings& s);
     static bool Reset();
 
 private:
