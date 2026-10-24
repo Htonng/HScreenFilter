@@ -11,6 +11,7 @@ const RANGES = {
   base: {
     brightness: [-100, 100], contrast: [0, 200], saturation: [0, 200],
     highlights: [-100, 100], shadows: [-100, 100], temperature: [-100, 100],
+    darkScene: [0, 100],
     sharpen: [0, 100], noiseReduction: [0, 100], edgeEnhancement: [0, 100],
     clarity: [0, 100], qualityEnhancement: [0, 100],
   },
@@ -20,11 +21,12 @@ const RANGES = {
     light: [-30, 30],
   },
 };
-const BASE_KEYS = ['brightness', 'contrast', 'saturation', 'highlights', 'shadows', 'temperature'];
+const BASE_KEYS = ['brightness', 'contrast', 'saturation', 'highlights', 'shadows', 'temperature', 'darkScene'];
 const ADVANCED_KEYS = ['sharpen', 'noiseReduction', 'edgeEnhancement', 'clarity', 'qualityEnhancement'];
 const BASE_LABELS = {
   brightness: '亮度 Brightness', contrast: '对比度 Contrast', saturation: '鲜艳度 Saturation',
-  highlights: '亮部 Highlights', shadows: '暗部 Shadows', temperature: '色温（冷 ← → 暖）',
+  highlights: '高光 Highlights', shadows: '阴影 Shadows', temperature: '色温（冷 ← → 暖）',
+  darkScene: '暗场景优化 Dark Scene（暗部提亮·保色相）',
 };
 const ADVANCED_LABELS = { sharpen: '锐化 Sharpen', noiseReduction: '降噪 Noise Reduction', edgeEnhancement: '边缘增强 Edge Enhancement', clarity: '清晰度 Clarity', qualityEnhancement: '画质增强 Quality Enhancement' };
 const CHANNELS = [
@@ -44,12 +46,18 @@ const FIELD_NAMES = ['色相', '饱和度', '明亮度'];
 const state = {
   initialized: false,
   settings: {
-    base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
+    base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, darkScene: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
     hsl: { master: { h: 0, s: 100, l: 0 }, channels: CHANNELS.slice(1).map(c => ({ name: c.name, h: 0, s: 100, l: 0 })) },
   },
   hslField: 0,
+  hslChannel: 0,
   displays: [], displayIndex: 0,
   master: false, lut: false, vsync: false, perapp: false,
+  vsyncForced: true,      // 滤镜层强制垂直同步（宿主下发；界面开关显示为开且锁住）
+  lutActive: false,
+  hdrColor: false,        // 显示器是否处于 HDR（仅用于解释「为什么 LUT 被锁成开」）
+  lutForced: false,
+  showFps: false, fps: -1,
   autostart: false, autotray: true,
   globalHotkey: '', engineText: '',
   profiles: [], activeProfile: -1, bindings: [],
@@ -100,6 +108,7 @@ function handleHost(msg) {
       applyState(msg);
       break;
     case 'engine': state.engineText = msg.text || ''; updateEngineStatus(); break;
+    case 'fps': state.fps = (typeof msg.fps === 'number') ? msg.fps : -1; updateFpsBadge(); break;
     case 'saved': setDirty(false); break;
     case 'dirty':
       if (msg.dirty) {
@@ -133,11 +142,12 @@ function defaultState() {
     displays: [{ index: 0, label: '主显示器（1920 × 1080）', enabled: false }],
     displayIndex: 0,
     master: false, lut: true, vsync: false, perapp: false,
+    showFps: false,
     autostart: false, autotray: true, globalHotkey: '',
     engine: '滤镜引擎：LUT 逐像素引擎',
     profiles: [], activeProfile: -1, bindings: [],
     settings: {
-      base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
+      base: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, darkScene: 0, sharpen: 0, noiseReduction: 0, edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0 },
       hsl: { master: { h: 0, s: 100, l: 0 }, channels: CHANNELS.slice(1).map(c => ({ name: c.name, h: 0, s: 100, l: 0 })) },
     },
   };
@@ -152,11 +162,18 @@ function applyState(p) {
   state.displays = p.displays || state.displays;
   state.displayIndex = (typeof p.displayIndex === 'number') ? p.displayIndex : 0;
   state.master = !!p.master; state.lut = !!p.lut;
+  state.lutActive = !!p.lutActive;
+  state.lutForced = !!p.lutForced;
+  if (typeof p.showFps === 'boolean') state.showFps = p.showFps;
   state.vsync = !!p.vsync;
+  if (typeof p.vsyncForced === 'boolean') state.vsyncForced = p.vsyncForced;
+  state.hdrColor = !!p.hdr;   // 显示器是否处于 HDR（只影响是否强制 LUT 引擎）
   state.perapp = !!p.perapp;
   state.autostart = !!p.autostart; state.autotray = !!p.autotray;
   state.globalHotkey = p.globalHotkey || '';
   state.engineText = p.engine || state.engineText;
+  // 界面主题由宿主持久化（profiles.json 的 Theme）；旧配置的 "default" 等同 auto。
+  if (typeof p.theme === 'string') state.theme = p.theme;
   state.profiles = p.profiles || [];
   state.activeProfile = (typeof p.activeProfile === 'number') ? p.activeProfile : -1;
   state.bindings = p.bindings || [];
@@ -177,6 +194,7 @@ function applyState(p) {
   updateEngineStatus();
   updateHslEnabled();
   updatePerAppEnabled();
+  syncThemeUI();
   state.initialized = true;
 }
 
@@ -185,10 +203,33 @@ function applyControls() {
   $('#displayEnable').checked = state.displays[state.displayIndex] ? state.displays[state.displayIndex].enabled : false;
   $('#displayEnableText').textContent = $('#displayEnable').checked ? '启用（已开）' : '启用（已关）';
   $('#lutSwitch').checked = state.lut;
-  $('#vsyncSwitch').checked = state.vsync;
+  // HDR 下 LUT 强制开启：显示为开且不允许关闭（放大镜/伽马对 HDR 内容无效）
+  $('#lutSwitch').disabled = state.lutForced;
+  const lutRow = $('#lutSwitch').closest('.toggle-row');
+  if (lutRow) lutRow.title = state.lutForced ? 'HDR 下自动启用 LUT 引擎，无法关闭（放大镜/伽马对 HDR 内容无效）' : '';
+  const lutLabel = lutRow ? lutRow.querySelector('.toggle-label') : null;
+  if (lutLabel) lutLabel.textContent = state.lutForced ? 'LUT 引擎开关（HDR 下自动启用，不可关闭）' : 'LUT 引擎开关';
+  // 滤镜层强制垂直同步：显示为「开」并锁住
+  //（窗口模式 Present(1)：由 DWM 把每一帧对齐到下一个 vblank，不用帧延迟等待对象）
+  $('#vsyncSwitch').checked = state.vsyncForced || state.vsync;
+  $('#vsyncSwitch').disabled = state.vsyncForced;
+  {
+    const row = $('#vsyncSwitch').closest('.toggle-row');
+    if (row) row.title = state.vsyncForced ? '滤镜层固定与显示器刷新对齐（强制垂直同步），不可关闭' : '';
+    const label = row ? row.querySelector('.toggle-label') : null;
+    if (label) label.textContent = state.vsyncForced ? '垂直同步 V-Sync（强制开启）' : '垂直同步 V-Sync';
+  }
+  const badge = $('#colorModeBadge');
+  // 色彩管道固定：DXGI 桌面复制 + SDR（B8G8R8A8）输入输出，不做 HDR 色彩转换。
+  badge.textContent = 'DXGI 桌面复制 · SDR';
+  badge.title = '滤镜用 DXGI 桌面复制取 SDR 画面（B8G8R8A8），LUT 后原样输出；'
+              + 'HDR 显示器上由 Windows 按「SDR 内容亮度」把覆盖层映射到 HDR 信号。';
+  badge.classList.toggle('hdr-on', state.hdrColor);
   $('#perAppSwitch').checked = state.perapp;
   $('#autoStartSwitch').checked = state.autostart;
   $('#autoTraySwitch').checked = state.autotray;
+  $('#fpsSwitch').checked = state.showFps;
+  updateFpsBadge();
   $('#globalHotkeyBadge').textContent = state.globalHotkey || '未设置';
   const selP = state.selectedProfile >= 0 ? state.profiles[state.selectedProfile] : null;
   $('#profileHotkeyBadge').textContent = selP && selP.hotkey ? selP.hotkey : '—';
@@ -308,9 +349,13 @@ function refreshAdvancedSliders() {
     num.value = value;
     paintFill(input, 0, 100, value, '');
   });
-  const enabled = !!state.lut;
-  const block = $('#advancedSliders');
+  // 以「LUT 引擎真的在跑」为准（开关打开但引擎回退到放大镜/伽马时仍应禁用）
+  const enabled = !!state.lutActive;
+  // 注意：禁用样式挂在 .advanced-block 上（不是 #advancedSliders），之前挂错层导致看起来仍可调
+  const block = $('#advancedSliders') ? $('#advancedSliders').closest('.advanced-block') : null;
   if (block) block.classList.toggle('advanced-disabled', !enabled);
+  $$('#advancedSliders input').forEach(el => { el.disabled = !enabled; });
+  if (block) block.style.opacity = enabled ? '' : '0.45';
   const hint = $('#advancedHint');
   if (hint) hint.textContent = enabled
     ? '高级画质处理已启用，将在 LUT 后处理阶段生效。'
@@ -339,13 +384,21 @@ function buildHslTabsAndChips() {
     b.dataset.channel = i;
     b.innerHTML = '<i style="--c:' + c.color + '"></i>' + c.name;
     b.addEventListener('click', () => {
-      $$('.chip').forEach(x => x.classList.toggle('active', x === b));
-      $$('#hslSliders .slider-row').forEach(r => r.style.opacity = '1');
-      if (i > 0) $$('#hslSliders .slider-row').forEach(r => {
-        if (+r.dataset.channel !== i && +r.dataset.channel !== 0) r.style.opacity = '.35';
-      });
+      state.hslChannel = i;
+      applyHslChipFocus();
     });
     $('#channelChips').appendChild(b);
+  });
+  applyHslChipFocus();
+}
+// 色系 chip 的“聚焦”状态要在切换字段（重建滑块）后仍然保持：
+// 旧实现只在点击时改一次 opacity，切换色相/饱和度/明亮度后全部滑块又变回 100%。
+function applyHslChipFocus() {
+  const active = state.hslChannel | 0;
+  $$('#channelChips .chip').forEach((x, idx) => x.classList.toggle('active', idx === active));
+  $$('#hslSliders .slider-row').forEach(r => {
+    const c = +r.dataset.channel;
+    r.style.opacity = (active === 0 || c === 0 || c === active) ? '1' : '.35';
   });
 }
 function hslVal(channel, field) {
@@ -417,6 +470,7 @@ function buildHslSliders() {
     input.style.background = hslGradient(c, field);
     list.appendChild(row);
   }
+  applyHslChipFocus();
   updateHslEnabled();
 }
 
@@ -455,10 +509,19 @@ function renderProfiles() {
   $$('#profileRows .btn-enable').forEach(b => b.addEventListener('click', ev => {
     ev.stopPropagation();
     const i = +b.dataset.profile;
-    state.activeProfile = i;
-    state.selectedProfile = i;
-    renderProfiles();
-    send({ type: 'profile-activate', index: i });
+    const activate = () => {
+      state.activeProfile = i;
+      state.selectedProfile = i;
+      renderProfiles();
+      send({ type: 'profile-activate', index: i });
+    };
+    const prof = state.profiles[i];
+    // 启用 LUT 配置同样会启动逐像素引擎：和手动拨 LUT 开关一样先提示性能损耗
+    if (prof && prof.engine === 'LUT' && !state.lut) {
+      confirmLutEnable(activate, '配置「' + prof.name + '」使用 LUT 引擎');
+      return;
+    }
+    activate();
   }));
   applyControls();
 }
@@ -482,16 +545,20 @@ function renderBindings() {
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 /* ── 模态框 ── */
-function openModal(title, fieldsHtml, onOk, okText) {
+function openModal(title, fieldsHtml, onOk, okText, cancelText) {
   $('#modalTitle').textContent = title;
   $('#modalBody').innerHTML = fieldsHtml;
   $('#modalOk').textContent = okText || '确定';
+  $('#modalCancel').textContent = cancelText || '取消';
   $('#modalOverlay').classList.add('show');
   $('#modalOk').onclick = () => { $('#modalOverlay').classList.remove('show'); onOk(); };
   $('#modalCancel').onclick = () => $('#modalOverlay').classList.remove('show');
   const first = $('#modalBody input, #modalBody select');
-  if (first) first.focus();
-  if (first && first.select) first.select();
+  if (first) {
+    first.focus();
+    // 只有文本/数字输入和 select 支持 select()；复选框调用会抛 InvalidStateError
+    if (first.tagName === 'SELECT' || first.type === 'text' || first.type === 'number') first.select();
+  }
 }
 function openNameModal(title, initial, onOk) {
   openModal(title,
@@ -525,23 +592,69 @@ function confirmModal(text, onOk) {
   openModal('确认', '<div class="modal-hint">' + esc(text) + '</div>', onOk, '删除');
 }
 
+/* ── LUT 性能损耗确认 ──
+ * LUT 滤镜不是普通调色：它每帧用 DXGI 桌面复制抓整个桌面，再对每个像素做
+ * 64³ 3D LUT 采样（高级调整还会叠 8 次邻域采样），GPU 占用/功耗远高于放大镜。
+ * 用户主动启用 LUT（开关 / LUT 配置 / LUT 预设）前必须明确询问一次；
+ * 勾选「本次运行不再提示」后同一进程内不再重复弹窗。 */
+let lutWarningAcknowledged = false;
+const LUT_PRESETS = ['hdr', 'cinematic', 'landscape', 'portrait', 'cyber'];
+function lutWarningHtml(reason) {
+  return '<div class="modal-hint modal-warning">' +
+    '<p><b>LUT 滤镜会持续占用 GPU 做全屏逐像素处理，性能损耗明显。</b></p>' +
+    '<p>' + esc(reason || '') + '</p>' +
+    '<ul>' +
+    '<li>每帧通过 DXGI 桌面复制抓取整个桌面（2K/4K 下每帧几十 MB 显存流量）；</li>' +
+    '<li>每个像素做 64³ 3D LUT 三线性采样，叠加锐化/降噪/清晰度时还要 8 次邻域采样；</li>' +
+    '<li>高分辨率 + 高刷新率、核显/低端独显、笔记本电池模式下尤其明显，游戏帧率可能下降；</li>' +
+    '<li>HDR 显示器上 LUT 会被强制启用（放大镜/伽马对 HDR 内容无效）。</li>' +
+    '</ul>' +
+    '<p>只是护眼/基础调色时建议改用「放大镜」引擎；需要分色系 HSL、锐化/降噪等高级效果时再启用 LUT。</p>' +
+    '<label class="modal-check"><input type="checkbox" id="lutWarnDontAsk"> 本次运行不再提示</label>' +
+    '</div>';
+}
+function confirmLutEnable(onOk, reason) {
+  if (lutWarningAcknowledged) { onOk(); return; }
+  openModal('启用 LUT 滤镜？', lutWarningHtml(reason), () => {
+    const cb = $('#lutWarnDontAsk');
+    if (cb && cb.checked) lutWarningAcknowledged = true;
+    onOk();
+  }, '仍然启用', '保持关闭');
+}
+
 /* ── 引擎状态 / 依赖开关 ── */
 function updateEngineStatus() {
   const on = state.master;
   const el = $('#engineStatus');
   el.querySelector('.dot').style.background = on ? 'var(--green)' : 'var(--orange)';
   const base = state.engineText || '滤镜引擎';
-  el.lastChild.textContent = ' ' + (on ? base : '滤镜引擎：已关闭');
+  const txt = $('#engineText') || el.lastChild;
+  if (txt) txt.textContent = on ? base : '滤镜引擎：已关闭';
+}
+/* 实时帧率（标题栏右上角）：开关关闭时隐藏；fps < 0 = 当前没有在跑的 LUT 引擎 */
+function updateFpsBadge() {
+  const el = $('#fpsBadge');
+  if (!el) return;
+  el.hidden = !state.showFps;
+  if (!state.showFps) return;
+  el.textContent = state.fps >= 0 ? state.fps.toFixed(1) + ' FPS' : '— FPS';
 }
 function updateHslEnabled() {
-  const on = state.lut;
+  // 不能只看开关：LUT 引擎启动失败时宿主会回退到放大镜/伽马，此时开关仍是「开」，
+  // 但 HSL 根本不会生效。以宿主下发的 lutActive（真的在跑逐像素引擎）为准。
+  const on = !!state.lut && !!state.lutActive;
   $$('#hslSliders .flat-range, #hslSliders .num, #hslTabs .tab, .chip').forEach(el => {
     el.disabled = !on; el.style.opacity = on ? '' : '.45';
   });
   $('#hslReset').disabled = !on;
-  $('#hslHint').textContent = on
-    ? '已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰。'
-    : '提示：关闭 LUT 引擎后使用放大镜引擎，暂不支持分色系 HSL。';
+  if (on) {
+    $('#hslHint').textContent = '已启用 LUT 引擎：8 个色系可分别精确调整、互不干扰（64³ 3D LUT 逐像素着色器，性能损耗较大）。'
+      + (state.lutForced ? ' HDR 显示器上由系统强制启用，不可关闭。' : '');
+  } else if (state.lut) {
+    $('#hslHint').textContent = 'LUT 引擎当前不可用（已回退到放大镜/伽马引擎），分色系 HSL 无法生效；请查看引擎状态或日志。';
+  } else {
+    $('#hslHint').textContent = '提示：关闭 LUT 引擎后使用放大镜引擎，暂不支持分色系 HSL。';
+  }
 }
 function updatePerAppEnabled() {
   const on = state.perapp;
@@ -553,14 +666,19 @@ function updatePerAppEnabled() {
 /* ── 主题（纯 UI）── */
 const media = window.matchMedia('(prefers-color-scheme: dark)');
 function initTheme() {
-  state.theme = (document.body.dataset.theme === 'light' || document.body.dataset.theme === 'dark')
-    ? document.body.dataset.theme : 'auto';
-  $('#themeSelect').value = state.theme;
+  syncThemeUI();
+}
+function syncThemeUI() {
+  state.theme = (state.theme === 'light' || state.theme === 'dark') ? state.theme : 'auto';
+  const sel = $('#themeSelect');
+  if (sel) sel.value = state.theme;
   applyTheme();
 }
 function applyTheme() {
   const eff = state.theme === 'auto' ? (media.matches ? 'dark' : 'light') : state.theme;
   document.body.dataset.theme = eff;
+  // 把实际生效的主题告诉宿主：窗口标题栏要跟着 UI 主题走（标题栏与界面一体）
+  send({ type: 'theme', dark: eff === 'dark' });
   $$('#baseSliders .flat-range').forEach(input => paintFill(input, +input.min, +input.max, +input.value, input.dataset.gradient || ''));
   $$('#hslSliders .flat-range').forEach(input => { input.style.background = hslGradient(+input.dataset.channel, +input.dataset.field); });
 }
@@ -576,49 +694,100 @@ function wireStaticControls() {
     masterEnable: 'master', lutSwitch: 'lut', vsyncSwitch: 'vsync',
     perAppSwitch: 'perapp',
     autoStartSwitch: 'autostart', autoTraySwitch: 'autotray', displayEnable: 'display',
+    fpsSwitch: 'showfps',
   };
-  const wire = (id, key) => {
+  const doSwitch = (id, el, v) => {
+    if (id === 'displayEnable') { state.displays[state.displayIndex].enabled = v; $('#displayEnableText').textContent = v ? '启用（已开）' : '启用（已关）'; }
+    else state[keyOf(id)] = v;
+    if (id === 'lutSwitch') { state.lutActive = v; refreshAdvancedSliders(); updateHslEnabled(); }
+    if (id === 'perAppSwitch') updatePerAppEnabled();
+    if (id === 'masterEnable') updateEngineStatus();
+    if (id === 'fpsSwitch') { state.fps = -1; updateFpsBadge(); }
+    // 「显示滤镜实时帧率」是界面偏好（宿主会立即落盘），不代表配置被改动，不弹保存条
+    if (id !== 'fpsSwitch') markDirty();
+    send({ type: 'switch', id: SWITCH_IDS[id] || id, value: v });
+  };
+  const keyOf = id => ({ masterEnable: 'master', lutSwitch: 'lut', vsyncSwitch: 'vsync',
+    perAppSwitch: 'perapp', autoStartSwitch: 'autostart', autoTraySwitch: 'autotray',
+    displayEnable: 'displayEnabled', fpsSwitch: 'showFps' }[id] || id);
+  // 绕过「再次确认」，直接启用 LUT（用于 LUT 预设确认之后）。
+  const enableLutNow = () => {
+    if (state.lut) return;
+    state.lut = true;
+    state.lutActive = true;
+    const sw = $('#lutSwitch');
+    if (sw) sw.checked = true;
+    updateHslEnabled();
+    refreshAdvancedSliders();
+    send({ type: 'switch', id: 'lut', value: true });
+  };
+  const wire = (id) => {
     const el = $('#' + id);
     if (!el) { console.error('[demo2] missing element: ' + id); return; }
     el.addEventListener('change', () => {
       const v = el.checked;
-      if (id === 'displayEnable') { state.displays[state.displayIndex].enabled = v; $('#displayEnableText').textContent = v ? '启用（已开）' : '启用（已关）'; }
-      else state[key] = v;
-      if (id === 'lutSwitch') updateHslEnabled();
-      if (id === 'perAppSwitch') updatePerAppEnabled();
-      if (id === 'masterEnable') updateEngineStatus();
-      markDirty();
-      send({ type: 'switch', id: SWITCH_IDS[id] || id, value: v });
+      // 从「关」拨到「开」的瞬间先问一次性能损耗；取消时把开关拨回去，不发消息。
+      if (id === 'lutSwitch' && v && !state.lut) {
+        el.checked = false;
+        confirmLutEnable(() => { el.checked = true; doSwitch(id, el, true); }, 'LUT 引擎开关');
+        return;
+      }
+      doSwitch(id, el, v);
     });
   };
-  wire('masterEnable', 'master'); wire('lutSwitch', 'lut');
-  wire('vsyncSwitch', 'vsync');
-  wire('perAppSwitch', 'perapp');
-  wire('autoStartSwitch', 'autostart'); wire('autoTraySwitch', 'autotray');
-  wire('displayEnable', 'displayEnabled');
+  wire('masterEnable'); wire('lutSwitch');
+  wire('vsyncSwitch');
+  wire('perAppSwitch');
+  wire('autoStartSwitch'); wire('autoTraySwitch');
+  wire('displayEnable');
+  wire('fpsSwitch');
 
   $('#displaySelect').addEventListener('change', () => {
     state.displayIndex = +$('#displaySelect').value;
     send({ type: 'display', index: state.displayIndex });
   });
-  $('#themeSelect').addEventListener('change', e => { state.theme = e.target.value; applyTheme(); });
+  $('#themeSelect').addEventListener('change', e => {
+    state.theme = e.target.value;
+    applyTheme();
+    send({ type: 'theme-save', theme: state.theme });
+  });
   media.addEventListener('change', () => { if (state.theme === 'auto') applyTheme(); });
 
   // 快捷预设（数值与原项目一致）
   const PRESETS = {
-    default: { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
-    eye:     { brightness: -5, contrast: 95, saturation: 95, highlights: 0, shadows: 0, temperature: 25, sharpen: 0 },
-    night:   { brightness: -40, contrast: 100, saturation: 90, highlights: 0, shadows: 0, temperature: 45, sharpen: 0 },
-    vivid:   { brightness: 0, contrast: 110, saturation: 150, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
+    // 基础组（只用基础滑块）
+    'default':     { brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
+    eye:           { brightness: -5, contrast: 95, saturation: 95, highlights: 0, shadows: 0, temperature: 25, sharpen: 0 },
+    night:         { brightness: -40, contrast: 100, saturation: 90, highlights: 0, shadows: 0, temperature: 45, sharpen: 0 },
+    vivid:         { brightness: 0, contrast: 110, saturation: 150, highlights: 0, shadows: 0, temperature: 0, sharpen: 0 },
+    'game-bright': { brightness: 4, contrast: 98, saturation: 105, highlights: -5, shadows: 20, temperature: 0, darkScene: 70, sharpen: 0 },
+    arena:         { brightness: 0, contrast: 125, saturation: 110, highlights: 5, shadows: -10, temperature: 0, sharpen: 10, clarity: 15 },
+    office:        { brightness: 3, contrast: 98, saturation: 92, highlights: 0, shadows: 0, temperature: -18, sharpen: 0 },
+    // LUT 组（分色系 HSL / 后处理由宿主下发，这里只给基础部分，Host 同步后补全）
+    hdr:           { brightness: 0, contrast: 108, saturation: 115, highlights: 8, shadows: -5, temperature: 0, sharpen: 8, clarity: 18 },
+    cinematic:     { brightness: 0, contrast: 108, saturation: 105, highlights: 5, shadows: -6, temperature: 6, sharpen: 0, clarity: 15 },
+    landscape:     { brightness: 0, contrast: 106, saturation: 110, highlights: -8, shadows: 12, temperature: 0, sharpen: 8, clarity: 25 },
+    portrait:      { brightness: 3, contrast: 102, saturation: 100, highlights: 5, shadows: 8, temperature: 0, sharpen: 0, clarity: 8, noiseReduction: 25 },
+    cyber:         { brightness: 0, contrast: 115, saturation: 120, highlights: 6, shadows: -12, temperature: 0, sharpen: 10, clarity: 28 },
   };
-  $$('.preset').forEach(b => b.addEventListener('click', () => {
-    const p = PRESETS[b.dataset.preset];
+  const applyPreset = (name) => {
+    const p = PRESETS[name];
     if (!p) return;
     state.settings.base = Object.assign(state.settings.base, p);
     refreshBaseSliders();
     refreshAdvancedSliders();
     markDirty();
-    send({ type: 'preset', name: b.dataset.preset });
+    send({ type: 'preset', name: name });
+  };
+  $$('.preset').forEach(b => b.addEventListener('click', () => {
+    const name = b.dataset.preset;
+    if (!PRESETS[name]) return;
+    // LUT 组预设只在 LUT 引擎下才有完整效果；顺手问一次是否启用（不自动改开关）
+    if (LUT_PRESETS.includes(name) && !state.lut) {
+      confirmLutEnable(() => { enableLutNow(); applyPreset(name); }, 'LUT 预设「' + b.textContent.trim() + '」');
+      return;
+    }
+    applyPreset(name);
   }));
 
   $('#hslReset').addEventListener('click', () => {
@@ -653,11 +822,17 @@ function wireStaticControls() {
   });
   $('#btnProfileUp').addEventListener('click', () => {
     const i = state.selectedProfile;
-    if (i > 0) send({ type: 'profile', action: 'move', index: i, delta: -1 });
+    if (i < 0) { $('#hotkeyHint').textContent = '请先在列表中选择一个配置'; return; }
+    if (i === 0) { $('#hotkeyHint').textContent = '已经是第一个配置'; return; }
+    state.selectedProfile = i - 1;
+    send({ type: 'profile', action: 'move', index: i, delta: -1 });
   });
   $('#btnProfileDown').addEventListener('click', () => {
     const i = state.selectedProfile;
-    if (i >= 0 && i < state.profiles.length - 1) send({ type: 'profile', action: 'move', index: i, delta: 1 });
+    if (i < 0) { $('#hotkeyHint').textContent = '请先在列表中选择一个配置'; return; }
+    if (i >= state.profiles.length - 1) { $('#hotkeyHint').textContent = '已经是最后一个配置'; return; }
+    state.selectedProfile = i + 1;
+    send({ type: 'profile', action: 'move', index: i, delta: 1 });
   });
   $('#btnProfileImport').addEventListener('click', () => send({ type: 'profile', action: 'import' }));
   $('#btnProfileExport').addEventListener('click', () => {

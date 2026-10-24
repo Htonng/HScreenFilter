@@ -8,6 +8,7 @@
 #include <shlwapi.h>
 #include <commdlg.h>
 #include <objbase.h>
+#include <dwmapi.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -18,6 +19,7 @@
 
 #include "WebView2.h"
 #include "common.h"
+#include "log.h"
 #include "models.h"
 #include "store.h"
 #include "monitors.h"
@@ -51,13 +53,14 @@ static bool LoadWebView2Loader()
 // ---------------------------------------------------------------------------
 // 日志
 // ---------------------------------------------------------------------------
-static std::wstring g_logPath;
-static void Log(const wchar_t *fmt, ...)
+static void AppLog(const wchar_t *fmt, ...)
 {
     wchar_t buf[2048];
     va_list ap; va_start(ap, fmt); vswprintf(buf, 2048, fmt, ap); va_end(ap);
-    FILE *f = _wfopen(g_logPath.c_str(), L"a, ccs=UTF-8");
-    if (f) { fwprintf(f, L"%s\n", buf); fclose(f); }
+    // 与引擎日志写进同一个文件（%LocalAppData%\HScreenFilter\debug.log）：
+    // 原来宿主写 exe 目录、引擎写 LocalAppData，界面「调试日志」按钮只打开前者，
+    // 于是 LutEngine 的帧率/捕获记录根本不在用户看到的文件里。
+    hsf::Log::Write(L"App", buf);
     OutputDebugStringW(buf);
 }
 
@@ -95,6 +98,23 @@ static bool g_trayAdded = false;
 static bool g_exitRequested = false;
 static UINT g_taskbarCreatedMsg = 0;   // explorer 重启通知（RegisterWindowMessage）
 static constexpr UINT_PTR kTimerWatchdog = 3;   // 引擎看门狗定时器
+static constexpr UINT_PTR kTimerFps = 4;        // 实时帧率推送（界面右上角）
+static constexpr UINT_PTR kTimerApply = 5;      // WebView2 未就绪时的兜底：延迟启动滤镜
+static constexpr UINT_PTR kTimerWebView = 6;    // WebView2 启动看门狗（白屏自愈）
+static constexpr UINT kMsgShowWindow = WM_APP + 2;   // 第二个实例请求已有实例显示主窗口
+
+// 自启进托盘：窗口必须先真正显示过一次再创建 WebView2 控制器 ——
+// WebView2 在「从未显示过」的窗口上初始化时不会建立可见的合成表面，之后从托盘
+// 还原只会得到一张纯白窗口（已复现）。做法：自启时先把窗口显示在屏幕外，
+// 等页面 ready（或导航完成）后再隐藏并归位，用户看不到闪烁。
+static bool g_startHidden = false;
+static bool g_startupVisibilityDone = false;
+static int g_normalX = 0, g_normalY = 0;
+static bool g_webViewReady = false;
+static bool g_initialApplyPending = false;
+static bool g_webViewReloadTried = false;
+static bool g_webViewFailed = false;
+static std::thread g_shaderPrewarm;
 
 static std::vector<std::function<void()>> g_uiQueue;
 static std::mutex g_uiMutex;
@@ -109,6 +129,10 @@ static void ApplyCurrent();
 static void SaveState();
 static void UpdateWatcher();
 static void ShowWindowApp(bool show);
+static void FinishStartupVisibility();
+static void RevealStartupWindow();
+static void ShowWebViewError(const std::wstring &detail);
+static void RequestInitialApply();
 
 static DisplayState &CurDisplay() { return data_.Displays[curDisplay_]; }
 
@@ -149,6 +173,7 @@ static void SetBaseValue(FilterSettings &s, const std::wstring &key, double v)
     else if (key == L"edgeEnhancement") s.EdgeEnhancement = v;
     else if (key == L"clarity") s.Clarity = v;
     else if (key == L"qualityEnhancement") s.QualityEnhancement = v;
+    else if (key == L"darkScene") s.DarkSceneBoost = v;
 }
 
 static void SetHslValue(FilterSettings &s, int channel, int field, double value)
@@ -205,7 +230,7 @@ static void InitializeDisplays()
 static void SaveState()
 {
     g_store.Save(data_);
-    Log(L"[store] saved profiles.json");
+    AppLog(L"[store] saved profiles.json");
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +242,13 @@ static std::wstring EngineStatusText()
     {
     case EngineKind::PixelShader:
         // 覆盖层因拿不到画面而暂停时明确告知（独占全屏/显示模式切换中）
-        return FilterEngine::Instance().OverlayPaused()
-            ? L"滤镜引擎：LUT 逐像素引擎（覆盖层暂停：独占全屏或显示模式切换中，恢复后自动继续）"
-            : L"滤镜引擎：LUT 逐像素引擎";
+        if (FilterEngine::Instance().OverlayPaused())
+            return L"滤镜引擎：LUT 逐像素引擎（覆盖层暂停：独占全屏或显示模式切换中，恢复后自动继续）";
+        // HDR 下即便用户关着 LUT 开关也会自动走 LUT（放大镜在 HDR 下对 HDR 内容无效）
+        if (!data_.UseDxgi && curDisplay_ >= 0 && curDisplay_ < (int)monitors_.size() &&
+            QueryDisplayHdr(monitors_[curDisplay_].X, monitors_[curDisplay_].Y))
+            return L"滤镜引擎：LUT 逐像素引擎（HDR 下自动启用）";
+        return L"滤镜引擎：LUT 逐像素引擎";
     case EngineKind::FullScreenColorEffect: return L"滤镜引擎：全屏颜色效果";
     case EngineKind::GammaRamp: return L"滤镜引擎：显卡伽马曲线";
     default: return L"滤镜引擎不可用：" + FilterEngine::Instance().LastError();
@@ -242,6 +271,25 @@ static void ApplyCurrent()
     // 时回到 data_.UseDxgi。这里只切换引擎层，不改动 data_.UseDxgi，避免自动切换
     // 污染保存的“当前设置”模式（例如：手动当前是放大镜，绑定的配置却是 LUT）。
     bool dxgiNow = perAppProfile ? perAppProfile->UseDxgi : data_.UseDxgi;
+    // HDR 显示器上放大镜/伽马引擎只能作用于 SDR 合成面：HDR 内容（HDR 壁纸/视频/独占全屏游戏）
+    // 完全不受影响，实测表现为「滤镜失效」。因此只要启用的显示器里有 HDR，就自动走 LUT 引擎
+    //（LUT 引擎用 DXGI 桌面复制取 SDR 画面、按像素处理），不改动用户保存的开关。
+    bool hdrEnabled = false;
+    for (int i = 0; i < (int)monitors_.size() && i < (int)data_.Displays.size(); i++)
+    {
+        if (!data_.Displays[i].IsEnabled) continue;
+        if (QueryDisplayHdr(monitors_[i].X, monitors_[i].Y)) { hdrEnabled = true; break; }
+    }
+    if (hdrEnabled && !dxgiNow)
+    {
+        static bool warnedHdrAutoLut = false;
+        if (!warnedHdrAutoLut)
+        {
+            warnedHdrAutoLut = true;
+            AppLog(L"[engine] HDR 显示器：自动使用 LUT 引擎（放大镜/伽马只能作用于 SDR 画面，HDR 内容会失效；不写回开关）");
+        }
+        dxgiNow = true;
+    }
     if (FilterEngine::Instance().UseDxgi() != dxgiNow)
     {
         FilterEngine::Instance().SetUseDxgi(dxgiNow);
@@ -258,12 +306,36 @@ static void ApplyCurrent()
         FilterSettings s = perAppProfile ? perAppProfile->Settings
                                          : (dxgiNow ? d.Current : NeutralizeHsl(d.Current));
         if (dxgiNow) FilterEngine::Instance().SetVsync(i, d.UseVsync);
+        // 实时帧率 / 详细帧率日志开关（界面「显示滤镜实时帧率」）
+        FilterEngine::Instance().SetFpsDetail(i, data_.ShowFps);
         if (FilterEngine::Instance().Apply(i, monitors_[i], s)) anyOk = true;
-        else Log(L"[engine] apply FAILED display %d: %s", i, FilterEngine::Instance().LastError().c_str());
+        else AppLog(L"[engine] apply FAILED display %d: %s", i, FilterEngine::Instance().LastError().c_str());
     }
     if (!anyEnabled) FilterEngine::Instance().Reset();
-    Log(L"[engine] apply done kind=%d useDxgi=%d anyEnabled=%d anyOk=%d",
-        (int)FilterEngine::Instance().Kind(), dxgiNow ? 1 : 0, anyEnabled ? 1 : 0, anyOk ? 1 : 0);
+    // 只在结果真的变化时记一条：拖动滑块时每秒会有上千次 apply，逐次写日志既刷屏又会
+    // 把日志文件撑大（旧实现实测 650 行/秒）。
+    {
+        static int lastKind = -1, lastDxgi = -1, lastEn = -1, lastOk = -1;
+        int k = (int)FilterEngine::Instance().Kind(), dx = dxgiNow ? 1 : 0, en = anyEnabled ? 1 : 0, ok = anyOk ? 1 : 0;
+        if (k != lastKind || dx != lastDxgi || en != lastEn || ok != lastOk)
+        {
+            lastKind = k; lastDxgi = dx; lastEn = en; lastOk = ok;
+            AppLog(L"[engine] apply done kind=%d useDxgi=%d anyEnabled=%d anyOk=%d", k, dx, en, ok);
+        }
+    }
+    // HDR + 非 LUT 引擎：实测会过曝、文字抗锯齿被裁成纯白，记一条便于排查
+    bool hdrHere = false;
+    if (curDisplay_ >= 0 && curDisplay_ < (int)monitors_.size())
+        hdrHere = QueryDisplayHdr(monitors_[curDisplay_].X, monitors_[curDisplay_].Y);
+    if (anyEnabled && !dxgiNow && hdrHere)
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            AppLog(L"[engine] 警告：显示器处于 HDR，当前引擎为放大镜/伽马（会过曝、文字发虚），建议开启 LUT 引擎");
+        }
+    }
 }
 
 static void ApplyLutMode(bool useLut)
@@ -317,9 +389,63 @@ static void SendDirtyState()
 static void ApplyPresetByName(const std::wstring &name)
 {
     FilterSettings p;
+    auto setCh = [&p](const wchar_t* ch, double h, double s, double l) {
+        HslChannel* c = p.FindChannel(ch);
+        if (c) { c->Hue = h; c->Saturation = s; c->Lightness = l; }
+    };
+    // ---- 基础组（只用基础滑块，放大镜/伽马引擎同样可用）----
     if (name == L"eye")        { p.Brightness = -5;  p.Contrast = 95;  p.Saturation = 95;  p.Temperature = 25; }
     else if (name == L"night") { p.Brightness = -40; p.Contrast = 100; p.Saturation = 90;  p.Temperature = 45; }
     else if (name == L"vivid") { p.Contrast = 110;   p.Saturation = 150; }
+    // 游戏暗场景提亮：抬黑位、略降对比避免糊，饱和微增保证颜色不发灰
+    // 游戏暗场景提亮：直接用「暗场景优化」自适应曲线（暗部大幅提亮、保色相），再配一点阴影/饱和
+    else if (name == L"game-bright") { p.Brightness = 4; p.Contrast = 98; p.Saturation = 105; p.Shadows = 20; p.Highlights = -5; p.DarkSceneBoost = 70; }
+    // 竞技清晰：高对比 + 压黑位，突出轮廓；由 LUT 后处理补锐化
+    else if (name == L"arena") { p.Contrast = 125; p.Saturation = 110; p.Shadows = -10; p.Highlights = 5; p.Sharpen = 10; p.Clarity = 15; }
+    // 冷色办公：偏冷、低饱和、轻微提亮，长时间看文档不刺眼
+    else if (name == L"office") { p.Brightness = 3; p.Contrast = 98; p.Saturation = 92; p.Temperature = -18; }
+    // ---- LUT 组（分色系 HSL / 后处理，需 LUT 引擎；HDR 下会自动启用）----
+    // HDR 色彩：略高对比 + 略高饱和 + 微提亮高光/压暗黑位，并加一点清晰度/锐化做出「HDR 观感」。
+    // 注意：SDR 内容按屏幕实际白点输出后，画面已在 HDR 亮度上，预设不能再叠加强对比/高饱和，
+    // 否则高光很快被推到 1.0 裁切（过曝）且颜色失真 —— 这里刻意取温和值。
+    //（清晰度/锐化属 LUT 后处理，仅 LUT 引擎下生效，其它引擎下参数保留但不应用）
+    else if (name == L"hdr")   { p.Contrast = 108;   p.Saturation = 115; p.Highlights = 8; p.Shadows = -5; p.Sharpen = 8; p.Clarity = 18; }
+    // 电影青橙：暗部偏青、亮部偏橙，绿降饱和（经典电影配色的核心）
+    else if (name == L"cinematic")
+    {
+        p.Contrast = 108; p.Saturation = 105; p.Highlights = 5; p.Shadows = -6; p.Temperature = 6; p.Clarity = 15;
+        setCh(HslChannelNames::Cyan, -8, 135, -4);
+        setCh(HslChannelNames::Blue, -6, 120, -6);
+        setCh(HslChannelNames::Orange, 4, 145, 8);
+        setCh(HslChannelNames::Yellow, 0, 115, 4);
+        setCh(HslChannelNames::Red, 0, 120, 2);
+        setCh(HslChannelNames::Green, 0, 80, 0);
+    }
+    // 风景浓郁：绿/青/蓝加饱和、抬暗部保留细节
+    else if (name == L"landscape")
+    {
+        p.Contrast = 106; p.Saturation = 110; p.Highlights = -8; p.Shadows = 12; p.Clarity = 25; p.Sharpen = 8;
+        setCh(HslChannelNames::Green, 0, 130, 3);
+        setCh(HslChannelNames::Cyan, 0, 125, 0);
+        setCh(HslChannelNames::Blue, -4, 125, 0);
+        setCh(HslChannelNames::Yellow, 0, 120, 2);
+    }
+    // 人像柔肤：肤色（红/橙）微提亮、降噪柔化，避免过度锐化
+    else if (name == L"portrait")
+    {
+        p.Brightness = 3; p.Contrast = 102; p.Highlights = 5; p.Shadows = 8; p.NoiseReduction = 25; p.Clarity = 8;
+        setCh(HslChannelNames::Orange, 0, 105, 6);
+        setCh(HslChannelNames::Red, 0, 105, 4);
+    }
+    // 赛博夜景：青蓝紫强化 + 高对比，霓虹感
+    else if (name == L"cyber")
+    {
+        p.Contrast = 115; p.Saturation = 120; p.Shadows = -12; p.Highlights = 6; p.Clarity = 28; p.Sharpen = 10;
+        setCh(HslChannelNames::Cyan, -10, 140, 0);
+        setCh(HslChannelNames::Blue, -8, 145, -6);
+        setCh(HslChannelNames::Purple, 6, 130, 0);
+        setCh(HslChannelNames::Magenta, 0, 125, 0);
+    }
     CurDisplay().Current = p.Clone();
     ApplyCurrent();
     SendDirtyState();
@@ -347,22 +473,22 @@ static void OnForegroundMatch(int hit, const std::wstring &proc, const std::wstr
     activeBinding_ = hit;
     SendStatus(L"perapp", PerAppStatusText());
     ApplyCurrent();
-    Log(L"[watcher] foreground %s -> hit=%d", proc.c_str(), hit);
+    AppLog(L"[watcher] foreground %s -> hit=%d", proc.c_str(), hit);
 }
 
 static void UpdateWatcher()
 {
-    if (!watcher_) { Log(L"[watcher] UpdateWatcher: watcher null"); return; }
+    if (!watcher_) { AppLog(L"[watcher] UpdateWatcher: watcher null"); return; }
     watcher_->SetTargets(data_.AppBindings);
     // SetTargets 会立即执行一次 CheckNow，这里同步取最新命中值，
     // 避免随后的 ApplyCurrent 仍用旧的 activeBinding_（表现为“先关后开/不立即生效”）
     activeBinding_ = watcher_->CurrentHit();
     if (data_.PerAppEnabled)
     {
-        Log(L"[watcher] UpdateWatcher: start (targets=%d)", (int)data_.AppBindings.size());
+        AppLog(L"[watcher] UpdateWatcher: start (targets=%d)", (int)data_.AppBindings.size());
         watcher_->Start(500);
     }
-    else { Log(L"[watcher] UpdateWatcher: stop"); watcher_->Stop(); activeBinding_ = -1; }
+    else { AppLog(L"[watcher] UpdateWatcher: stop"); watcher_->Stop(); activeBinding_ = -1; }
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +648,7 @@ static void SetActiveProfileAndApply(int index)
     SaveState();
     SendDirtyState();
     SendState(L"sync");
-    Log(L"[bridge] activate profile %d (\"%s\")", index, data_.Profiles[index].Name.c_str());
+    AppLog(L"[bridge] activate profile %d (\"%s\")", index, data_.Profiles[index].Name.c_str());
 }
 
 static void DeactivateProfile()
@@ -577,7 +703,22 @@ static void RegisterGlobalToggle()
         globalHotkeyId_ = id;
 }
 
-static void HandleHotkeyCapture(int vk)
+// 标题栏与 UI 同色、并把系统标题文字设成同色（等于隐藏）→ 观感上标题栏与界面一体。
+// 颜色取网页主题的 --bg / --border：深色 #171B22/#313B4B、浅色 #F3F5F9/#E1E7EF。
+// 网页每次切换/解析主题都会发 {type:'theme', dark} 过来校正（'auto' 由页面解析后上报）。
+static void ApplyTitleBarTheme(bool dark)
+{
+    if (!g_hwnd) return;
+    BOOL d = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(g_hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &d, sizeof(d));
+    COLORREF caption = dark ? RGB(0x17, 0x1B, 0x22) : RGB(0xF3, 0xF5, 0xF9);
+    COLORREF border = dark ? RGB(0x31, 0x3B, 0x4B) : RGB(0xE1, 0xE7, 0xEF);
+    DwmSetWindowAttribute(g_hwnd, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+    DwmSetWindowAttribute(g_hwnd, 36 /*DWMWA_TEXT_COLOR*/, &caption, sizeof(caption));
+    DwmSetWindowAttribute(g_hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof(border));
+}
+
+static void HandleHotkeyCapture(int vk, int scanCode, bool extended)
 {
     if (vk == VK_ESCAPE)
     {
@@ -594,7 +735,9 @@ static void HandleHotkeyCapture(int vk)
     if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) mods |= MOD_SHIFT;
     if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) mods |= MOD_ALT;
     if ((GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0) mods |= 0x8;
-    std::wstring display = HotkeyText::Format(mods, vk);
+    // 显示名带扫描码：小键盘 -/. / Enter 与主键区 M/./Enter 共用同一 VK，
+    // 不区分就会出现「按小键盘 - 显示 VK6D」这种情况。
+    std::wstring display = HotkeyText::FormatEx(mods, vk, scanCode, extended);
     bool wasGlobal = captureGlobal_;
     int wasProfile = captureProfile_;
     capturing_ = false; captureGlobal_ = false; captureProfile_ = -1;
@@ -620,7 +763,8 @@ static LRESULT CALLBACK CaptureHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode >= 0 && wParam == WM_KEYDOWN && capturing_)
     {
         auto *kb = (KBDLLHOOKSTRUCT *)lParam;
-        HandleHotkeyCapture((int)kb->vkCode);
+        HandleHotkeyCapture((int)kb->vkCode, (int)kb->scanCode,
+                            (kb->flags & LLKHF_EXTENDED) != 0);
         if (g_captureHook) { UnhookWindowsHookEx(g_captureHook); g_captureHook = nullptr; }
         return 1; // 消费按键
     }
@@ -634,7 +778,7 @@ static void BeginCapture(bool global, int profile)
     captureGlobal_ = global;
     captureProfile_ = global ? -1 : profile;
     g_captureHook = SetWindowsHookExW(WH_KEYBOARD_LL, CaptureHookProc, GetModuleHandleW(nullptr), 0);
-    Log(L"[hotkey] capturing (global=%d profile=%d)", global ? 1 : 0, profile);
+    AppLog(L"[hotkey] capturing (global=%d profile=%d)", global ? 1 : 0, profile);
 }
 
 static void ClearHotkey(bool global, int profile)
@@ -670,7 +814,7 @@ static void AddTray()
     nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), L"APPICON");
     swprintf(nid.szTip, 128, L"HScreenFilter %s", kVersionString);
     g_trayAdded = Shell_NotifyIconW(NIM_ADD, &nid);
-    Log(L"[tray] added=%d", g_trayAdded ? 1 : 0);
+    AppLog(L"[tray] added=%d", g_trayAdded ? 1 : 0);
 }
 
 static void RemoveTray()
@@ -761,8 +905,76 @@ static void ShowWindowApp(bool show)
         fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
         FlashWindowEx(&fi);
     }
-    Log(L"[tray] 显示主窗口: 之前最小化=%d 之前隐藏=%d 前台=%d",
+    AppLog(L"[tray] 显示主窗口: 之前最小化=%d 之前隐藏=%d 前台=%d",
         wasIconic ? 1 : 0, wasVisible ? 0 : 1, GetForegroundWindow() == g_hwnd ? 1 : 0);
+
+    // WebView2 控制器在窗口隐藏期间可能停止绘制；还原后显式恢复可见性并重新下发
+    // 一次 bounds，强制它按当前客户区重绘（否则自启/最小化到托盘后可能只看到白底）。
+    if (g_controller)
+    {
+        g_controller->put_IsVisible(TRUE);
+        ResizeWebView();
+    }
+}
+
+// 自启窗口已经在屏幕外显示过（为了让 WebView2 建立合成表面），现在把它藏起来并归位。
+// 只在页面 ready / 导航成功后调用一次；失败路径由 RevealStartupWindow 保证用户能看到错误。
+static void FinishStartupVisibility()
+{
+    if (!g_hwnd || g_startupVisibilityDone) return;
+    g_startupVisibilityDone = true;
+    if (!g_startHidden)
+    {
+        // 手动启动本来就是显示状态；只需要确保没有遗留在屏幕外的坐标
+        return;
+    }
+    ShowWindowAsync(g_hwnd, SW_HIDE);
+    SetWindowPos(g_hwnd, HWND_TOP, g_normalX, g_normalY, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    AppLog(L"[init] 页面已就绪：自启窗口已隐藏并归位到 (%d,%d)，可从托盘恢复", g_normalX, g_normalY);
+}
+
+// 自启时如果 WebView2 初始化失败，必须把窗口挪回屏幕内并显示，否则用户只会看到
+// 一个「什么都没有」的后台进程。错误对话框也挂在主窗口上，避免被前台窗口盖住。
+static void RevealStartupWindow()
+{
+    if (!g_hwnd) return;
+    g_startupVisibilityDone = true;
+    ShowWindow(g_hwnd, SW_SHOWNORMAL);
+    SetWindowPos(g_hwnd, HWND_TOP, g_normalX, g_normalY, 0, 0,
+                 SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    ResizeWebView();
+    AppLog(L"[init] 启动失败：已把主窗口移回屏幕内显示");
+}
+
+static void ShowWebViewError(const std::wstring& detail)
+{
+    if (g_webViewFailed) return;
+    g_webViewFailed = true;
+    g_webViewReady = false;
+    AppLog(L"[init] WebView2 启动失败：%s", detail.c_str());
+    RevealStartupWindow();
+    std::wstring msg = L"界面组件 WebView2 未能启动。\n\n" + detail +
+        L"\n\n可尝试：\n"
+        L"1. 安装或修复 Microsoft Edge WebView2 Runtime；\n"
+        L"2. 确认程序目录下 WebView2Loader.dll 与 webui2\\ 完整；\n"
+        L"3. 查看日志：" + hsf::Log::FilePath();
+    MessageBoxW(g_hwnd, msg.c_str(), L"HScreenFilter 启动失败", MB_OK | MB_ICONERROR | MB_TOPMOST);
+    g_exitRequested = true;
+    if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+}
+
+// 错峰启动：先把主窗口/WebView2 初始化完，再启动 LUT 覆盖层与渲染线程。
+// 旧顺序是在 WebView2 冷启动的同一时刻就创建全屏覆盖层 + 180fps 渲染线程，
+// 首启时两者抢 GPU/CPU，表现为「刚开滤镜大幅卡顿，重启几次（缓存热了）才稳」。
+static void RequestInitialApply()
+{
+    if (!g_initialApplyPending) return;
+    g_initialApplyPending = false;
+    if (g_hwnd) KillTimer(g_hwnd, kTimerApply);
+    AppLog(L"[init] 主窗口/页面已就绪，开始应用滤镜（错峰启动）");
+    ApplyCurrent();
+    SendState(L"sync");
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +994,7 @@ static JsonValue SettingsToJson(const FilterSettings &s)
     base.Set(L"edgeEnhancement", JsonValue::NumValue(s.EdgeEnhancement));
     base.Set(L"clarity", JsonValue::NumValue(s.Clarity));
     base.Set(L"qualityEnhancement", JsonValue::NumValue(s.QualityEnhancement));
+    base.Set(L"darkScene", JsonValue::NumValue(s.DarkSceneBoost));
     JsonValue master = JsonValue::ObjectValue();
     master.Set(L"h", JsonValue::NumValue(s.Hue));
     master.Set(L"s", JsonValue::NumValue(s.HslSaturation));
@@ -822,10 +1035,33 @@ static JsonValue BuildStatePayload(const wchar_t *type)
     j.Set(L"displays", std::move(displays));
     j.Set(L"displayIndex", JsonValue::NumValue((double)curDisplay_));
     j.Set(L"master", JsonValue::BoolValue(data_.IsEnabled));
-    j.Set(L"lut", JsonValue::BoolValue(data_.UseDxgi));
+    // HDR 显示器上强制性走 LUT（放大镜/伽马作用在合成面上，对 HDR 桌面等于滤镜失效）：
+    // 开关显示为「开」（effective）并置 lutForced，界面据此锁住开关。
+    // 注意：捕获方式固定是 DXGI 桌面复制（SDR 画面），HDR 只影响「该不该用 LUT 引擎」。
+    bool hdrNowPayload = false;
+    if (curDisplay_ >= 0 && curDisplay_ < (int)monitors_.size())
+        hdrNowPayload = QueryDisplayHdr(monitors_[curDisplay_].X, monitors_[curDisplay_].Y);
+    j.Set(L"lut", JsonValue::BoolValue(data_.UseDxgi || hdrNowPayload));
+    j.Set(L"lutForced", JsonValue::BoolValue(hdrNowPayload));
     j.Set(L"vsync", JsonValue::BoolValue(CurDisplay().UseVsync));
+    // 滤镜层强制垂直同步（窗口模式 Present(1)，由 DWM 对齐 vblank）：界面开关显示为「开」并锁住。
+    j.Set(L"vsyncForced", JsonValue::BoolValue(true));
+    {
+        bool hdrNow = false;
+        if (curDisplay_ >= 0 && curDisplay_ < (int)monitors_.size())
+            hdrNow = QueryDisplayHdr(monitors_[curDisplay_].X, monitors_[curDisplay_].Y);
+        j.Set(L"hdr", JsonValue::BoolValue(hdrNow));
+    }
+    // LUT 引擎是否真的在跑（高级调整以此决定可否调节，而不是只看开关）
+    j.Set(L"lutActive", JsonValue::BoolValue(FilterEngine::Instance().Kind() == EngineKind::PixelShader));
     j.Set(L"perapp", JsonValue::BoolValue(data_.PerAppEnabled));
     j.Set(L"capture", JsonValue::BoolValue(data_.Captureable));
+    j.Set(L"showFps", JsonValue::BoolValue(data_.ShowFps));
+    // 界面主题（auto/light/dark）：页面据此恢复上次选择；临时文件/旧配置里的
+    // "default" 一律按 auto 处理（models 的默认值仍是 auto）。
+    std::wstring theme = data_.Theme;
+    if (theme != L"light" && theme != L"dark") theme = L"auto";
+    j.Set(L"theme", JsonValue::StrValue(theme));
     j.Set(L"autostart", JsonValue::BoolValue(data_.AutoStart));
     j.Set(L"autotray", JsonValue::BoolValue(data_.MinimizeToTray));
     j.Set(L"globalHotkey", JsonValue::StrValue(data_.GlobalDisplay));
@@ -880,6 +1116,21 @@ static void SendStatus(const wchar_t *id, const std::wstring &text)
     g_webview->PostWebMessageAsJson(j.SerializeCompact().c_str());
 }
 
+// 实时帧率推送：只在用户开启「显示滤镜实时帧率」时发送，每 500ms 一次。帧率由 LUT 引擎
+// 在渲染线程里统计（1 秒窗口），这里只做转发 —— 界面右上角的数字 + 覆盖层右上角的 OSD。
+// fps < 0 表示当前没有在跑的 LUT 引擎（显示「—」）。
+static void PushPresentFps()
+{
+    if (!g_webview || !data_.ShowFps) return;
+    double fps = FilterEngine::Instance().PresentFps(curDisplay_);
+    JsonValue j = JsonValue::ObjectValue();
+    j.Set(L"type", JsonValue::StrValue(L"fps"));
+    j.Set(L"fps", JsonValue::NumValue(fps));
+    g_webview->PostWebMessageAsJson(j.SerializeCompact().c_str());
+    // 覆盖层右上角的帧率 OSD（每台在跑的显示器各显示自己的帧率）
+    FilterEngine::Instance().UpdateFpsOsd();
+}
+
 // ---------------------------------------------------------------------------
 // 页面消息处理
 // ---------------------------------------------------------------------------
@@ -888,8 +1139,14 @@ static void HandleMessage(JsonValue &msg)
     std::wstring type = msg.GetString(L"type", L"");
     if (type == L"ready")
     {
-        Log(L"[web] ready w=%d h=%d", (int)msg.GetNumber(L"w", 0), (int)msg.GetNumber(L"h", 0));
+        AppLog(L"[web] ready w=%d h=%d", (int)msg.GetNumber(L"w", 0), (int)msg.GetNumber(L"h", 0));
+        g_webViewReady = true;
+        if (g_hwnd) KillTimer(g_hwnd, kTimerWebView);
         SendState(L"init");
+        // 顺序很重要：先让自启窗口隐藏/归位，再启动全屏覆盖层，避免自启时两者同时改
+        // 合成状态（也是首启卡顿的一个来源）。
+        FinishStartupVisibility();
+        RequestInitialApply();
 #ifdef HSF_DEBUG
         SetTimer(g_hwnd, 1, 2500, nullptr);
         SetTimer(g_hwnd, 2, 5000, nullptr);
@@ -898,7 +1155,7 @@ static void HandleMessage(JsonValue &msg)
     }
     if (type == L"applied")
     {
-        Log(L"[web] applied: displays=%d profiles=%d master=%d lut=%d",
+        AppLog(L"[web] applied: displays=%d profiles=%d master=%d lut=%d",
             (int)msg.GetNumber(L"displays", -1), (int)msg.GetNumber(L"profiles", -1),
             msg.GetBool(L"master", false) ? 1 : 0, msg.GetBool(L"lut", false) ? 1 : 0);
         return;
@@ -908,6 +1165,22 @@ static void HandleMessage(JsonValue &msg)
         SetBaseValue(CurDisplay().Current, msg.GetString(L"key", L""), msg.GetNumber(L"value", 0));
         ApplyCurrent();
         SendDirtyState();
+        return;
+    }
+    // 网页上报实际生效主题：标题栏配色跟着 UI 走（'auto' 时页面已按系统解析）
+    if (type == L"theme")
+    {
+        ApplyTitleBarTheme(msg.GetBool(L"dark", false));
+        return;
+    }
+    // 界面主题是用户偏好：立即落盘，重启/自启后保持（与「显示实时帧率」一致）
+    if (type == L"theme-save")
+    {
+        std::wstring theme = msg.GetString(L"theme", L"auto");
+        if (theme != L"auto" && theme != L"light" && theme != L"dark") theme = L"auto";
+        data_.Theme = theme;
+        SaveState();
+        AppLog(L"[bridge] 界面主题 = %s", theme.c_str());
         return;
     }
     if (type == L"hsl")
@@ -939,11 +1212,21 @@ static void HandleMessage(JsonValue &msg)
             if (v) { bool allOff = true; for (auto &d : data_.Displays) if (d.IsEnabled) { allOff = false; break; }
                      if (allOff) for (auto &d : data_.Displays) d.IsEnabled = true; }
             ApplyCurrent();
+            // 总开关是全局状态，不属于「当前配置」的草稿；立即落盘，重启后保持。
+            SaveState();
         }
-        else if (id == L"display" || id == L"displayEnable") { CurDisplay().IsEnabled = v; ApplyCurrent(); }
-        else if (id == L"lut")
-        {
-            int ai = CurDisplay().ActiveProfileIndex;
+        else if (id == L"display" || id == L"displayEnable") { CurDisplay().IsEnabled = v; ApplyCurrent(); SaveState(); }
+          else if (id == L"lut")
+          {
+              // HDR 下 LUT 是强制的（放大镜/伽马对 HDR 内容无效），忽略关闭请求
+              bool hdrHere = curDisplay_ >= 0 && curDisplay_ < (int)monitors_.size() &&
+                             QueryDisplayHdr(monitors_[curDisplay_].X, monitors_[curDisplay_].Y);
+              if (hdrHere && !v)
+              {
+                  SendState(L"sync");
+                  return;
+              }
+              int ai = CurDisplay().ActiveProfileIndex;
             if (ai >= 0 && ai < (int)data_.Profiles.size()) data_.Profiles[ai].UseDxgi = v;
             ApplyLutMode(v);
             ApplyCurrent();
@@ -951,11 +1234,38 @@ static void HandleMessage(JsonValue &msg)
             SendState(L"sync");
         }
         else if (id == L"vsync") { CurDisplay().UseVsync = v; if (data_.UseDxgi && CurDisplay().IsEnabled) FilterEngine::Instance().SetVsync(curDisplay_, v); SendDirtyState(); }
-        else if (id == L"perapp") { data_.PerAppEnabled = v; UpdateWatcher(); ApplyCurrent(); }
-        else if (id == L"capture") { data_.Captureable = v; FilterEngine::Instance().SetOverlayCapturable(v); }
-        else if (id == L"autostart") { data_.AutoStart = v; AutoStart::Set(v); }
-        else if (id == L"autotray") { data_.MinimizeToTray = v; }
-        Log(L"[bridge] switch %s = %d", id.c_str(), v ? 1 : 0);
+        else if (id == L"perapp") { data_.PerAppEnabled = v; UpdateWatcher(); ApplyCurrent(); SaveState(); }
+        else if (id == L"capture") { data_.Captureable = v; FilterEngine::Instance().SetOverlayCapturable(v); SaveState(); }
+        else if (id == L"showfps")
+        {
+            // 显示滤镜实时帧率：右上角显示 + 日志每秒一条帧率明细（抓游戏内卡顿用）
+            data_.ShowFps = v;
+            for (int i = 0; i < (int)data_.Displays.size(); i++)
+                FilterEngine::Instance().SetFpsDetail(i, v);
+            if (g_hwnd)
+            {
+                if (v) { SetTimer(g_hwnd, kTimerFps, 500, nullptr); PushPresentFps(); }
+                else KillTimer(g_hwnd, kTimerFps);
+            }
+            // 显示偏好立即落盘：用户不用为了这个开关去点「保存」，重启后也还在
+            SaveState();
+            AppLog(L"[bridge] 实时帧率显示 = %d（日志详细帧率%s）", v ? 1 : 0, v ? L"已开启" : L"已关闭");
+        }
+        else if (id == L"autostart")
+        {
+            // 注册表写入可能失败（组策略/权限）：以注册表实际状态为准回写 UI，
+            // 并把结果落盘，避免「界面显示已开、实际没写进去」或重启后状态回退。
+            AutoStart::Set(v);
+            data_.AutoStart = AutoStart::IsEnabled();
+            SaveState();
+            if (data_.AutoStart != v)
+            {
+                SendStatus(L"hint", v ? L"开机自启设置失败：注册表写入被拒绝" : L"开机自启关闭失败：注册表项无法删除");
+                SendState(L"sync");   // 把开关拨回注册表的真实状态，避免界面显示与实际不一致
+            }
+        }
+        else if (id == L"autotray") { data_.MinimizeToTray = v; SaveState(); }
+        AppLog(L"[bridge] switch %s = %d", id.c_str(), v ? 1 : 0);
         SendStatus(L"perapp", PerAppStatusText());
         return;
     }
@@ -965,8 +1275,13 @@ static void HandleMessage(JsonValue &msg)
         if (idx >= 0 && idx < (int)data_.Displays.size())
         {
             curDisplay_ = idx;
+            // 切换显示器后，脏状态比较基准必须同步到这台显示器的当前值，
+            // 否则「改了 A 屏再切到 B 屏」会误报脏、取消时还会把 A 屏的快照写回 B 屏。
             savedSnapshot_ = CurDisplay().Current.Clone();
+            savedUseDxgi_ = data_.UseDxgi;
+            savedUseVsync_ = CurDisplay().UseVsync;
             ApplyCurrent();
+            SendDirtyState();
             SendState(L"sync");
         }
         return;
@@ -1096,10 +1411,11 @@ static void HandleMessage(JsonValue &msg)
     }
     if (type == L"log")
     {
-        ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        // 打开完整日志（宿主 + 滤镜引擎同一个文件）
+        ShellExecuteW(nullptr, L"open", hsf::Log::FilePath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return;
     }
-    Log(L"[web] unhandled: %s", type.c_str());
+    AppLog(L"[web] unhandled: %s", type.c_str());
 }
 
 
@@ -1108,16 +1424,16 @@ static void HandleMessage(JsonValue &msg)
 static void RunTestScript()
 {
     FILE *f = _wfopen((ExeDir() + L"\\app-test.json").c_str(), L"rb");
-    if (!f) { Log(L"[test] no test script"); return; }
+    if (!f) { AppLog(L"[test] no test script"); return; }
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
     std::string bytes;
     if (len > 0 && len < 4 * 1024 * 1024) { bytes.resize((size_t)len); fread(&bytes[0], 1, (size_t)len, f); }
     fclose(f);
     JsonValue root;
-    if (!JsonValue::Parse(Utf8ToWide(bytes), root) || !root.IsArray()) { Log(L"[test] bad test script"); return; }
-    Log(L"[test] executing %d messages", (int)root.arr.size());
+    if (!JsonValue::Parse(Utf8ToWide(bytes), root) || !root.IsArray()) { AppLog(L"[test] bad test script"); return; }
+    AppLog(L"[test] executing %d messages", (int)root.arr.size());
     for (auto &m : root.arr) HandleMessage(m);
-    Log(L"[test] done");
+    AppLog(L"[test] done");
 }
 #endif // HSF_DEBUG
 
@@ -1166,8 +1482,29 @@ public:
     STDMETHODIMP Invoke(ICoreWebView2 *sender, ICoreWebView2NavigationCompletedEventArgs *args) override
     {
         BOOL ok = FALSE; if (args) args->get_IsSuccess(&ok);
-        Log(L"[nav] success=%d", ok ? 1 : 0);
+        AppLog(L"[nav] success=%d", ok ? 1 : 0);
         if (g_hwnd) SetWindowTextW(g_hwnd, (Format(L"HScreenFilter %s", kVersionString)).c_str());
+        if (ok)
+        {
+            // JS 的 ready 是首选信号；导航成功作为兜底，保证自启窗口不会一直停在屏幕外。
+            FinishStartupVisibility();
+        }
+        else
+        {
+            // 页面加载失败一次时先重载（磁盘/Defender 偶发占用、WebView2 冷启动竞争），
+            // 第二次仍失败才报明确的错误 —— 不再留一张纯白窗口让用户猜。
+            if (!g_webViewReloadTried && sender)
+            {
+                g_webViewReloadTried = true;
+                AppLog(L"[nav] 首次导航失败，立即重载一次");
+                sender->Reload();
+            }
+            else
+            {
+                ShowWebViewError(L"页面导航失败：" + g_url +
+                                 L"\n请确认 webui2\\index.html 存在且可读。");
+            }
+        }
         return S_OK;
     }
 };
@@ -1188,7 +1525,7 @@ public:
     STDMETHODIMP_(ULONG) Release() override { ULONG r = --ref_; if (r == 0) delete this; return r; }
     STDMETHODIMP Invoke(HRESULT result) override
     {
-        Log(L"[preview] CapturePreview result=0x%08X", (unsigned)result);
+        AppLog(L"[preview] CapturePreview result=0x%08X", (unsigned)result);
         return S_OK;
     }
 };
@@ -1221,20 +1558,44 @@ public:
     {
         if (FAILED(result) || !controller)
         {
-            Log(L"[init] controller failed: 0x%08X", (unsigned)result);
-            if (g_hwnd) DestroyWindow(g_hwnd);
+            ShowWebViewError(Format(L"创建 WebView2 控制器失败 (0x%08X)。\n"
+                                    L"常见原因：WebView2 Runtime 未安装/版本过旧，或用户数据目录被其它进程占用。",
+                                    (unsigned)result));
             return S_OK;
         }
         ICoreWebView2 *webview = nullptr;
         if (FAILED(controller->get_CoreWebView2(&webview)) || !webview)
         {
-            Log(L"[init] get_CoreWebView2 failed");
-            if (g_hwnd) DestroyWindow(g_hwnd);
+            ShowWebViewError(L"无法从控制器取得 CoreWebView2 接口。");
             return S_OK;
         }
         g_controller = controller; g_controller->AddRef();
         g_webview = webview;
-        Log(L"[init] controller created");
+        // 关键：显式恢复可见性。自启时窗口曾在屏幕外显示过，若控制器沿用了
+        // 「不可见」状态，从托盘恢复后就会是一张白底窗口（WebView2 不绘制）。
+        g_controller->put_IsVisible(TRUE);
+        // 页面加载完成前先铺与主题一致的颜色，避免白屏闪光；不支持该接口的老运行时忽略。
+        {
+            ComPtr<ICoreWebView2Controller2> c2;
+            if (SUCCEEDED(controller->QueryInterface(IID_ICoreWebView2Controller2,
+                                                     (void**)c2.GetAddressOf())) && c2)
+            {
+                bool dark = (data_.Theme == L"dark");
+                if (data_.Theme != L"light" && data_.Theme != L"dark")
+                {
+                    DWORD appsUseLight = 1, size = sizeof(appsUseLight);
+                    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &appsUseLight, &size);
+                    dark = (appsUseLight == 0);
+                }
+                COREWEBVIEW2_COLOR bg{};
+                bg.A = 255;
+                if (dark) { bg.R = 0x17; bg.G = 0x1B; bg.B = 0x22; }
+                else      { bg.R = 0xF3; bg.G = 0xF5; bg.B = 0xF9; }
+                c2->put_DefaultBackgroundColor(bg);
+            }
+        }
+        AppLog(L"[init] controller created（窗口可见=%d）", IsWindowVisible(g_hwnd) ? 1 : 0);
         ResizeWebView();
         ICoreWebView2Settings *settings = nullptr;
         if (SUCCEEDED(webview->get_Settings(&settings)) && settings)
@@ -1246,7 +1607,11 @@ public:
         }
         webview->add_NavigationCompleted(new NavCompletedHandler(), nullptr);
         webview->add_WebMessageReceived(new MsgReceivedHandler(), nullptr);
-        Log(L"[init] navigate: %s", g_url.c_str());
+        g_webViewReady = false;
+        g_webViewReloadTried = false;
+        // 启动看门狗：12 秒还没收到页面 ready 就重载一次，再不行就给出错误提示。
+        if (g_hwnd) SetTimer(g_hwnd, kTimerWebView, 12000, nullptr);
+        AppLog(L"[init] navigate: %s", g_url.c_str());
         webview->Navigate(g_url.c_str());
         return S_OK;
     }
@@ -1269,12 +1634,13 @@ public:
     {
         if (FAILED(result) || !env)
         {
-            Log(L"[init] environment failed: 0x%08X", (unsigned)result);
-            if (g_hwnd) DestroyWindow(g_hwnd);
+            ShowWebViewError(Format(L"创建 WebView2 环境失败 (0x%08X)。\n"
+                                    L"请确认系统已安装 Microsoft Edge WebView2 Runtime，且用户数据目录可写。",
+                                    (unsigned)result));
             return S_OK;
         }
         g_env = env; g_env->AddRef();
-        Log(L"[init] environment created");
+        AppLog(L"[init] environment created");
         env->CreateCoreWebView2Controller(g_hwnd, new ControllerCreatedHandler());
         return S_OK;
     }
@@ -1283,13 +1649,35 @@ public:
 // ---------------------------------------------------------------------------
 // 窗口
 // ---------------------------------------------------------------------------
+// 后台预热 LUT 着色器：d3dcompiler 的编译是纯 CPU 工作，第一次启用滤镜时
+// LutEngine::CreatePipeline 要付 100ms+，正好落在用户点开关的瞬间（UI 线程阻塞）。
+// 进程启动后就把 4 个着色器编译进进程级缓存，等页面 ready 再启滤镜时通常已编译完，
+// 用户感知到的启动停顿明显缩短。低优先级，不抢 WebView2 冷启动的 CPU。
+static void PrewarmLutShaders()
+{
+    if (FilterEngine::Instance().Kind() != EngineKind::PixelShader) return;
+    g_shaderPrewarm = std::thread([] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        DWORD t0 = GetTickCount();
+        std::wstring err;
+        ComPtr<ID3DBlob> blob;
+        bool ok = CompileShader(g_vsSource, "main", "vs_4_0", blob, err);
+        ok = ok && CompileShader(g_psLutSource, "main", "ps_4_0", blob, err);
+        ok = ok && CompileShader(g_psPassthroughSource, "main", "ps_4_0", blob, err);
+        ok = ok && CompileShader(g_csLutSource, "CSMain", "cs_5_0", blob, err);
+        AppLog(L"[init] LUT 着色器预热%s，耗时 %ums%s%s",
+               ok ? L"完成" : L"失败", (unsigned)(GetTickCount() - t0),
+               ok ? L"" : L"：", ok ? L"" : err.c_str());
+    });
+}
+
 static void InitWebView2(const std::wstring &userDataDir)
 {
     if (!g_createEnv) return;
     LPWSTR ver = nullptr;
     if (g_getVersion && SUCCEEDED(g_getVersion(nullptr, &ver)) && ver)
     {
-        Log(L"[init] WebView2 runtime: %s", ver);
+        AppLog(L"[init] WebView2 runtime: %s", ver);
         CoTaskMemFree(ver);
     }
     g_createEnv(nullptr, userDataDir.c_str(), nullptr, new EnvCreatedHandler());
@@ -1300,14 +1688,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_APP + 1: DrainUiQueue(); return 0;
+    case kMsgShowWindow:
+        // 第二个实例启动时请求显示已有实例：必须走 ShowWindowApp 的完整还原路径
+        // （SW_RESTORE/SW_SHOWNA + put_IsVisible + ResizeWebView），否则自启托盘实例
+        // 被直接 ShowWindow 后 WebView2 可能仍是白底。
+        ShowWindowApp(true);
+        return 0;
     case WM_DISPLAYCHANGE:
         // 分辨率 / DSR / HDR 切换后重新枚举显示器并重新应用：覆盖层几何与交换链
         // 跟着新分辨率走，避免滤镜作用在错误的区域或旧尺寸上。
-        Log(L"[display] WM_DISPLAYCHANGE %dx%d", (int)LOWORD(lp), (int)HIWORD(lp));
+        AppLog(L"[display] WM_DISPLAYCHANGE %dx%d", (int)LOWORD(lp), (int)HIWORD(lp));
         InitializeDisplays();
+        // 重新枚举后 curDisplay_ 可能回到主显示器；保存快照也要跟着切，
+        // 否则新显示器的当前值会和旧快照比较，误报「有未保存修改」。
+        savedSnapshot_ = CurDisplay().Current.Clone();
+        savedUseDxgi_ = data_.UseDxgi;
+        savedUseVsync_ = CurDisplay().UseVsync;
         ApplyCurrent();
         SendState(L"sync");
         return 0;
+    case WM_NCHITTEST:
+    {
+        // 标题栏已延伸进客户区（DwmExtendFrameIntoClientArea）：顶部一条算标题栏，
+        // 可拖动/双击最大化；右侧留出系统按钮宽度，其余仍按客户区处理，网页才能点。
+        LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
+        if (hit != HTCLIENT) return hit;
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(hwnd, &pt);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        int captionH = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYFRAME);
+        int buttonsW = 150;   // Win10/11 三个标题栏按钮的宽度（含留白）
+        if (pt.y >= 0 && pt.y < captionH && pt.x < rc.right - buttonsW)
+            return HTCAPTION;
+        return HTCLIENT;
+    }
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED && data_.MinimizeToTray)
         {
@@ -1317,12 +1732,50 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else ResizeWebView();
         return 0;
     case WM_TIMER:
+        if (wp == kTimerFps) { PushPresentFps(); return 0; }
+        if (wp == kTimerApply)
+        {
+            // 页面 6 秒都没 ready：不无限等，先把滤镜按保存的状态应用上；
+            // WebView2 后续恢复时 ready 仍会走正常路径（RequestInitialApply 幂等）。
+            if (g_initialApplyPending)
+            {
+                AppLog(L"[init] 页面 ready 超时，兜底启动滤镜");
+                RequestInitialApply();
+            }
+            else KillTimer(hwnd, kTimerApply);
+            return 0;
+        }
+        if (wp == kTimerWebView)
+        {
+            KillTimer(hwnd, kTimerWebView);
+            if (g_webViewReady || g_webViewFailed) return 0;
+            if (!g_webview)
+            {
+                // 环境/控制器回调一直没来：不能无限等，给用户明确提示并退出。
+                ShowWebViewError(L"WebView2 初始化超时（12 秒内没有创建出控制器）。\n"
+                                 L"常见原因：WebView2 Runtime 安装损坏、用户数据目录被其它进程占用。");
+                return 0;
+            }
+            if (!g_webViewReloadTried)
+            {
+                g_webViewReloadTried = true;
+                AppLog(L"[web] 12 秒仍未收到 ready，重载页面一次");
+                g_webview->Reload();
+                SetTimer(hwnd, kTimerWebView, 12000, nullptr);
+            }
+            else
+            {
+                ShowWebViewError(L"页面在 24 秒内没有完成加载（未收到 ready）。\n"
+                                 L"请检查 webui2\\index.html 与 app.js 是否完整。");
+            }
+            return 0;
+        }
         if (wp == kTimerWatchdog)
         {
             // 引擎看门狗：LUT 引擎静默死亡 / 伽马表被系统重置时自动恢复
             if (FilterEngine::Instance().Watchdog())
             {
-                Log(L"[watchdog] 检测到引擎失效，已自动重建");
+                AppLog(L"[watchdog] 检测到引擎失效，已自动重建");
                 SendState(L"sync");
             }
             return 0;
@@ -1408,9 +1861,30 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    g_logPath = ExeDir() + L"\\HScreenFilter.log";
-    Log(L"=== HScreenFilter %s start (build %s) ===",
+    AppLog(L"=== HScreenFilter %s start (build %s) ===",
         kVersionString, Utf8ToWide(__DATE__ " " __TIME__).c_str());
+
+    // 单实例：桥接版此前没有互斥（原生版有），同时开两个实例会有两条 topmost 覆盖层
+    // 各自做桌面复制、互相抢帧 —— 实测表现为 HDR 下捕获帧格式来回跳、画面闪烁/黑屏。
+    // 已有实例：把它的主窗口叫到前面然后退出。
+    {
+        HANDLE onceMutex = CreateMutexW(nullptr, TRUE, L"HScreenFilter_SingleInstance");
+        DWORD mutexErr = GetLastError();
+        if (!onceMutex || mutexErr == ERROR_ALREADY_EXISTS)
+        {
+            HWND existing = FindWindowW(L"HScreenFilterMainWindow", nullptr);
+            AppLog(L"[init] 已有实例在运行（hwnd=%p），本次启动退出", existing);
+            if (existing)
+            {
+                // 交给已有实例自己走 ShowWindowApp：它会同时恢复 WebView2 可见性/尺寸。
+                PostMessageW(existing, kMsgShowWindow, 0, 0);
+            }
+            if (onceMutex) CloseHandle(onceMutex);
+            // 直接终止：此路径没有任何需要清理的资源，避免异步日志的静态析构 join
+            // 因日志文件被另一个实例占用而把「第二个实例」卡在退出阶段。
+            ExitProcess(0);
+        }
+    }
 
     // 命令行开关：--capturable / --no-capturable 临时覆盖"允许捕获"（不写回配置）。
     // 用途：排查 NVIDIA 录制（ShadowPlay/即时重放）与覆盖层捕获亲和性的相互影响。
@@ -1431,6 +1905,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     // 数据 + 引擎
     data_ = g_store.Load();
+    // 自启状态以注册表为准（旧版本可能只写了注册表没写配置，或用户手动删除了项）
+    data_.AutoStart = AutoStart::IsEnabled();
+    if (data_.Theme != L"light" && data_.Theme != L"dark") data_.Theme = L"auto";
     if (cliCapturable) data_.Captureable = true;
     if (cliNoCapturable) data_.Captureable = false;
     InitializeDisplays();
@@ -1441,12 +1918,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     FilterEngine::Instance().SetUseDxgi(data_.UseDxgi);
     FilterEngine::Instance().Initialize();
     FilterEngine::Instance().SetOverlayCapturable(data_.Captureable);
-    Log(L"[data] profiles=%d bindings=%d displays=%d useDxgi=%d engine=%d capturable=%d%s",
+    AppLog(L"[data] profiles=%d bindings=%d displays=%d useDxgi=%d engine=%d capturable=%d%s",
         (int)data_.Profiles.size(), (int)data_.AppBindings.size(), (int)data_.Displays.size(),
         data_.UseDxgi ? 1 : 0, (int)FilterEngine::Instance().Kind(),
         data_.Captureable ? 1 : 0,
         (cliCapturable || cliNoCapturable) ? L"（命令行覆盖）" : L"");
-    ApplyCurrent();
+    // 不在进程刚起来时就 ApplyCurrent：此时 WebView2/主窗口还在冷启动，
+    // 同时创建全屏覆盖层 + 180fps 渲染线程会互相抢 GPU/CPU，首启表现为大幅卡顿。
+    // 改为等页面 ready 后由 RequestInitialApply() 错峰启动；6 秒兜底。
+    g_initialApplyPending = true;
 
     // 后台消息窗口 + 热键
     msgWindow_.Create();
@@ -1457,7 +1937,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     // 前台监听
     watcher_ = std::make_unique<ForegroundAppWatcher>();
     watcher_->MatchChanged = [](int hit, const std::wstring &proc, const std::wstring &title) {
-        Log(L"[watcher] callback fired hit=%d proc=%s", hit, proc.c_str());
+        AppLog(L"[watcher] callback fired hit=%d proc=%s", hit, proc.c_str());
         InvokeUi([hit, proc, title]() { OnForegroundMatch(hit, proc, title); });
     };
     UpdateWatcher();
@@ -1475,7 +1955,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         {
             // explorer 重启后托盘图标会被系统清掉且不会自动恢复 —— 不重新添加的话，
             // 之后点托盘（含双击）永远没有反应。
-            Log(L"[tray] 收到 TaskbarCreated，重新添加托盘图标");
+            AppLog(L"[tray] 收到 TaskbarCreated，重新添加托盘图标");
             RemoveTray();
             AddTray();
         }
@@ -1483,7 +1963,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     if (!LoadWebView2Loader())
     {
-        Log(L"[init] WebView2Loader.dll 未找到");
+        AppLog(L"[init] WebView2Loader.dll 未找到");
         MessageBoxW(nullptr, L"未找到 WebView2Loader.dll，请将其放在本程序同目录。", kAppName, MB_OK | MB_ICONERROR);
         return 1;
     }
@@ -1519,7 +1999,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         {
             physW = (int)(physW * f);
             physH = (int)(physH * f);
-            Log(L"[init] window scaled to fit work area (factor=%.2f) -> %dx%d phys", f, physW, physH);
+            AppLog(L"[init] window scaled to fit work area (factor=%.2f) -> %dx%d phys", f, physW, physH);
         }
     }
 
@@ -1530,39 +2010,85 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     g_wndW = rc.right - rc.left; g_wndH = rc.bottom - rc.top;
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     std::wstring wndTitle = Format(L"HScreenFilter %s", kVersionString);
+    // 自启进托盘：窗口仍需「先真正显示一次」再初始化 WebView2，否则控制器不会建立
+    // 可见合成表面，之后从托盘恢复只有白底（已复现）。这里先显示在屏幕外，
+    // 页面 ready 后再隐藏并归位，用户看不到闪烁。
+    g_startHidden = AutoStartLaunched() && data_.MinimizeToTray;
+    g_normalX = (sx - g_wndW) / 2;
+    g_normalY = (sy - g_wndH) / 3;
+    int createX = g_startHidden ? (-g_wndW - 64) : g_normalX;
+    int createY = g_normalY;
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, wndTitle.c_str(),
-                                style, (sx - g_wndW) / 2, (sy - g_wndH) / 3, g_wndW, g_wndH,
+                                style, createX, createY, g_wndW, g_wndH,
                                 nullptr, nullptr, hInst, nullptr);
-    if (!hwnd) { Log(L"[init] CreateWindow failed: %lu", GetLastError()); return 1; }
+    if (!hwnd) { AppLog(L"[init] CreateWindow failed: %lu", GetLastError()); return 1; }
     g_hwnd = hwnd;
+    AppLog(L"[init] 主窗口已创建：startHidden=%d 位置=(%d,%d) 归位=(%d,%d)",
+           g_startHidden ? 1 : 0, createX, createY, g_normalX, g_normalY);
+
+    // 标题栏与 UI 融为一体（WinUI 观感）：把窗口框架延伸到客户区，
+    // 标题栏区域变成透明、由网页内容填充；标题栏高度内的拖动交给 WM_NCHITTEST
+    // 返回 HTCAPTION 处理（见 WndProc），右侧留给系统的最小化/最大化/关闭按钮。
+    {
+        MARGINS margins{ -1, -1, -1, -1 };
+        HRESULT hr = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        if (FAILED(hr)) AppLog(L"[ui] DwmExtendFrameIntoClientArea 失败 0x%08X", (unsigned)hr);
+
+        // Win11 圆角（老系统忽略失败）
+        DWORD corner = 2 /*DWMWCP_ROUND*/;
+        DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &corner, sizeof(corner));
+
+        // 先用系统主题给标题栏上色；网页加载后会按「UI 实际生效主题」再校正一次
+        DWORD appsUseLight = 1, size = sizeof(appsUseLight);
+        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &appsUseLight, &size);
+        ApplyTitleBarTheme(appsUseLight == 0);
+    }
 
     std::wstring pagePath, pageUrl;
     ResolveWebUi(pagePath, pageUrl);
     g_url = pageUrl;
-    Log(L"[init] webui: %s", pagePath.c_str());
+    AppLog(L"[init] webui: %s", pagePath.c_str());
 
     wchar_t la[512];
     std::wstring userData;
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", la, 512))
         userData = std::wstring(la) + L"\\HScreenFilter\\Browser";
 
-    bool startHidden = AutoStartLaunched() && data_.MinimizeToTray;
-    if (!startHidden) ShowWindow(hwnd, SW_SHOW);
+    // 无论是否自启进托盘，创建 WebView2 控制器前窗口必须处于「已显示」状态。
+    // 自启时用 SW_SHOWNOACTIVATE 显示在屏幕外，不抢焦点；就绪后 FinishStartupVisibility 隐藏并归位。
+    ShowWindow(hwnd, g_startHidden ? SW_SHOWNOACTIVATE : SW_SHOW);
     UpdateWindow(hwnd);
 
     // explorer 重启通知：注册后才能在托盘图标被系统清掉时重新添加
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
+    // 着色器预热与 WebView2 初始化并行：两者都在后台/异步，不阻塞创建窗口。
+    PrewarmLutShaders();
     InitWebView2(userData);
     AddTray();
+    // 环境/控制器创建本身也可能卡住（WebView2 Runtime 异常、用户数据目录被锁）：
+    // 这里先起 12 秒看门狗，controller 回调成功后会重置它。
+    SetTimer(hwnd, kTimerWebView, 12000, nullptr);
+
+    // 页面 ready 是首选启动时机；这里 6 秒兜底，避免 WebView2 异常时滤镜永远不启动。
+    SetTimer(hwnd, kTimerApply, 6000, nullptr);
 
     // 引擎看门狗：每 5 秒检查一次 LUT 引擎/伽马曲线是否被系统或驱动重置
     SetTimer(hwnd, kTimerWatchdog, 5000, nullptr);
+    // 实时帧率推送（仅在用户开启「显示滤镜实时帧率」时发送，见 PushPresentFps）
+    if (data_.ShowFps)
+    {
+        for (int i = 0; i < (int)data_.Displays.size(); i++)
+            FilterEngine::Instance().SetFpsDetail(i, true);
+        SetTimer(hwnd, kTimerFps, 500, nullptr);
+    }
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
 
-    Log(L"=== HScreenFilter exit ===");
+    if (g_shaderPrewarm.joinable()) g_shaderPrewarm.join();
+    AppLog(L"=== HScreenFilter exit ===");
     if (SUCCEEDED(coInit)) CoUninitialize();
     return (int)m.wParam;
 }

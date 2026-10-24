@@ -17,6 +17,7 @@ JsonValue FilterSettings::ToJson() const
     j.Set(L"EdgeEnhancement", JsonValue::NumValue(EdgeEnhancement));
     j.Set(L"Clarity", JsonValue::NumValue(Clarity));
     j.Set(L"QualityEnhancement", JsonValue::NumValue(QualityEnhancement));
+    j.Set(L"DarkSceneBoost", JsonValue::NumValue(DarkSceneBoost));
     j.Set(L"ActiveHslChannel", JsonValue::StrValue(ActiveHslChannel));
     j.Set(L"Hue", JsonValue::NumValue(Hue));
     j.Set(L"HslSaturation", JsonValue::NumValue(HslSaturation));
@@ -49,6 +50,7 @@ void FilterSettings::FromJson(const JsonValue& j)
     EdgeEnhancement = j.GetNumber(L"EdgeEnhancement", 0);
     Clarity = j.GetNumber(L"Clarity", 0);
     QualityEnhancement = j.GetNumber(L"QualityEnhancement", 0);
+    DarkSceneBoost = j.GetNumber(L"DarkSceneBoost", 0);
     ActiveHslChannel = j.GetString(L"ActiveHslChannel", HslChannelNames::Master);
     Hue = j.GetNumber(L"Hue", 0);
     HslSaturation = j.GetNumber(L"HslSaturation", 100);
@@ -171,6 +173,7 @@ JsonValue ProfileData::ToJson() const
 
     j.Set(L"Theme", JsonValue::StrValue(Theme));
     j.Set(L"Captureable", JsonValue::BoolValue(Captureable));
+    j.Set(L"ShowFps", JsonValue::BoolValue(ShowFps));
     j.Set(L"PerAppEnabled", JsonValue::BoolValue(PerAppEnabled));
 
     JsonValue bindings = JsonValue::ArrayValue();
@@ -208,6 +211,7 @@ void ProfileData::FromJson(const JsonValue& j)
     UseDxgi = j.GetBool(L"UseDxgi", false);
     Theme = j.GetString(L"Theme", L"default");
     Captureable = j.GetBool(L"Captureable", false);
+    ShowFps = j.GetBool(L"ShowFps", false);
     PerAppEnabled = j.GetBool(L"PerAppEnabled", false);
 
     const JsonValue* displays = j.Get(L"Displays");
@@ -269,9 +273,58 @@ std::wstring HotkeyText::KeyName(int vk)
     case VK_RIGHT:  return L"→";
     case VK_UP:     return L"↑";
     case VK_DOWN:   return L"↓";
+    // 小键盘运算符：这几个 VK 只可能来自小键盘（主键区的 * + - . / 是另外的 VK），
+    // 所以直接给小键盘名字。原来 0x6D 被误写成返回 "M"（VK_M 其实是 0x4D，已由字母表处理），
+    // 日志里就会出现「注册 M (VK6D)」这种看不懂的输出。
+    case VK_MULTIPLY: return L"小键盘 *";
+    case VK_ADD:      return L"小键盘 +";
+    case VK_SUBTRACT: return L"小键盘 -";
+    case VK_DECIMAL:  return L"小键盘 .";
+    case VK_DIVIDE:   return L"小键盘 /";
     default:
         return hsf::Format(L"VK%02X", vk);
     }
+}
+
+// 小键盘的 - / . / Enter / / 与主键区的 M / . / Enter / / 共用同一 VK，
+// 只有扫描码能区分（SET1 扫描码：小键盘 - = 0x4A、+ = 0x4E、. = 0x53、
+// / = E0 0x35、Enter = E0 0x1C，数字 0..9 = 0x52,0x4F,0x50,0x51,0x4B,0x4C,0x4D,0x47,0x48,0x49）。
+static bool NumpadName(int vk, int scanCode, bool extended, std::wstring& out)
+{
+    static const struct { int scan; int vk; const wchar_t* name; } kMap[] = {
+        { 0x4A, 0x6D, L"小键盘 -" },
+        { 0x4E, 0x6B, L"小键盘 +" },
+        { 0x53, 0x6E, L"小键盘 ." },
+        { 0x35, 0x6F, L"小键盘 /" },
+        { 0x1C, 0x0D, L"小键盘 Enter" },
+        { 0x52, 0x60, L"小键盘 0" },
+        { 0x4F, 0x61, L"小键盘 1" },
+        { 0x50, 0x62, L"小键盘 2" },
+        { 0x51, 0x63, L"小键盘 3" },
+        { 0x4B, 0x64, L"小键盘 4" },
+        { 0x4C, 0x65, L"小键盘 5" },
+        { 0x4D, 0x66, L"小键盘 6" },
+        { 0x47, 0x67, L"小键盘 7" },
+        { 0x48, 0x68, L"小键盘 8" },
+        { 0x49, 0x69, L"小键盘 9" },
+    };
+    for (const auto& e : kMap)
+    {
+        if (e.scan != scanCode) continue;
+        // 需要扩展位的两项（小键盘 / 与 Enter）只在有扩展位时才算小键盘
+        bool needsExtended = (e.scan == 0x35 || e.scan == 0x1C);
+        if (needsExtended != extended) continue;
+        out = e.name;
+        return true;
+    }
+    return false;
+}
+
+std::wstring HotkeyText::KeyNameEx(int vk, int scanCode, bool extended)
+{
+    std::wstring name;
+    if (NumpadName(vk, scanCode, extended, name)) return name;
+    return KeyName(vk);
 }
 
 std::wstring HotkeyText::Format(int modifiers, int key)
@@ -287,6 +340,22 @@ std::wstring HotkeyText::Format(int modifiers, int key)
     if ((modifiers & MOD_SHIFT) != 0) add(L"Shift");
     if ((modifiers & MOD_ALT) != 0) add(L"Alt");
     parts += KeyName(key);
+    return parts;
+}
+
+std::wstring HotkeyText::FormatEx(int modifiers, int key, int scanCode, bool extended)
+{
+    if (key == 0) return L"";
+    std::wstring parts;
+    auto add = [&](const wchar_t* s) {
+        if (!parts.empty()) parts += L"+";
+        parts += s;
+    };
+    if ((modifiers & MOD_WIN) != 0) add(L"Win");
+    if ((modifiers & MOD_CONTROL) != 0) add(L"Ctrl");
+    if ((modifiers & MOD_SHIFT) != 0) add(L"Shift");
+    if ((modifiers & MOD_ALT) != 0) add(L"Alt");
+    parts += KeyNameEx(key, scanCode, extended);
     return parts;
 }
 

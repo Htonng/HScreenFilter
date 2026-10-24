@@ -58,7 +58,8 @@ bool HotkeyService::Register(int modifiers, int key, std::function<void()> callb
     if (ok) registeredWithWin32_.insert(id);
     else InstallKeyboardHook(); // 组合被占用/注册失败 → 用钩子兜底
 
-    Log::WriteFmt(L"Hotkey", L"注册 %s: %s", HotkeyText::Format(modifiers, key).c_str(),
+    // 附上 VK 码：小键盘 -/. / Enter 与主键区 M/./Enter 共用同一 VK，只按名字看不出区别
+    Log::WriteFmt(L"Hotkey", L"注册 %s (VK%02X): %s", HotkeyText::Format(modifiers, key).c_str(), key,
                   ok ? L"RegisterHotKey 成功" : L"RegisterHotKey 失败，使用键盘钩子兜底");
     return true;
 }

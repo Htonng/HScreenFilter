@@ -92,6 +92,9 @@ input, select, button { font-family: inherit; }
 
 .engine-status {
   flex: 1;
+  min-width: 0;              /* 允许被压缩，否则文字会盖到右侧徽标上 */
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 12px;
   color: var(--text-2);
   display: flex;
@@ -104,6 +107,62 @@ input, select, button { font-family: inherit; }
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--green);
   flex: none;
+}
+.engine-status .engine-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 被锁住的开关（如 HDR 下的 LUT）：仍显示为开，但不接受点击 */
+.toggle-row input:disabled + .track { opacity: .6; cursor: not-allowed; }
+.toggle-row:has(input:disabled) { cursor: not-allowed; }
+
+/* 标题栏延伸进客户区：顶部这条是系统标题栏（可拖动），右侧给三个系统按钮留位，
+   其余内容左移，避免被系统按钮压住。 */
+.app-header {
+  padding-right: 150px;
+  -webkit-app-region: drag;
+}
+.app-header button,
+.app-header .engine-status,
+.app-header .color-mode-badge {
+  -webkit-app-region: no-drag;
+}
+
+/* 色彩模式徽标：HDR 原生 / SDR 原生（由宿主按显示器 HDR 状态下发） */
+.color-mode-badge {
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  margin-right: 8px;
+  white-space: nowrap;
+}
+.color-mode-badge.hdr-on {
+  color: #1a73c7;
+  border-color: #7cb6ea;
+  background: rgba(64, 158, 255, 0.12);
+}
+
+/* 实时帧率（标题栏右上角）：开关在「配置与快捷键 → 显示滤镜实时帧率」。
+   等宽数字 + 固定最小宽度，避免数字跳动时徽标宽度来回变。 */
+.fps-badge {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  min-width: 66px;
+  text-align: center;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
 }
 
 /* ───────────── 工具栏（两行）───────────── */
@@ -433,12 +492,25 @@ input:checked + .track .knob { left: 18px; }
 .advanced-block { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
 .advanced-block .page-head h2 { font-size: 15px; font-weight: 700; }
 .advanced-block.advanced-disabled .slider-row { opacity: .45; pointer-events: none; }
+.advanced-block.advanced-disabled { opacity: .55; }
+.advanced-block.advanced-disabled .flat-range,
+.advanced-block.advanced-disabled .num { filter: grayscale(.6); cursor: not-allowed; }
+.advanced-block.advanced-disabled .advanced-hint { color: var(--orange); }
 .advanced-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-3); white-space: pre-line; }
 
 /* ───────────── 快捷预设 ───────────── */
 .preset-block { margin-top: 18px; }
 .preset-block h2 { font-size: 13px; margin-bottom: 10px; }
 .preset-btns { display: flex; gap: 8px; }
+.preset-group { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.preset-group-label {
+  flex: none;
+  width: 34px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.preset-group .preset-btns { flex-wrap: wrap; }
 .preset { min-width: 76px; }
 
 /* ───────────── HSL 页 ───────────── */
@@ -673,6 +745,11 @@ input:checked + .track .knob { left: 18px; }
 .modal .modal-field input:focus, .modal .modal-field select:focus { border-color: var(--accent); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .modal-hint { font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
+.modal-warning { font-size: 12px; line-height: 1.65; color: var(--text-2); max-height: 58vh; overflow: auto; }
+.modal-warning p { margin: 0 0 8px; }
+.modal-warning ul { margin: 0 0 8px 18px; padding: 0; }
+.modal-warning li { margin-bottom: 3px; }
+.modal-check { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--text-2); font-size: 12px; }
 
 /* 快捷键捕获提示 */
 .hotkey-capturing { color: var(--orange); font-weight: 600; animation: blink 1s infinite; }

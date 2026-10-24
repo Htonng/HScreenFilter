@@ -154,6 +154,8 @@ bool FilterEngine::Apply(int displayIndex, const DisplayMonitor& display, const 
                 // 避免首次启用/切换引擎时设置丢失。
                 auto vi = vsyncByDisplay_.find(displayIndex);
                 if (vi != vsyncByDisplay_.end()) eng->UseVsync = vi->second;
+                auto fi = fpsDetailByDisplay_.find(displayIndex);
+                if (fi != fpsDetailByDisplay_.end()) eng->SetFpsDetail(fi->second);
                 eng->Capturable = capturable_;
                 eng->ApplyOverlayAffinity();
                 engine = eng.get();
@@ -288,6 +290,8 @@ bool FilterEngine::Watchdog()
             }
             auto vi = vsyncByDisplay_.find(index);
             if (vi != vsyncByDisplay_.end()) eng->UseVsync = vi->second;
+            auto fi = fpsDetailByDisplay_.find(index);
+            if (fi != fpsDetailByDisplay_.end()) eng->SetFpsDetail(fi->second);
             eng->Capturable = capturable_;
             eng->ApplyOverlayAffinity();
             eng->Apply(st.Settings);
@@ -334,6 +338,43 @@ void FilterEngine::SetVsync(int displayIndex, bool useVsync)
     }
 }
 
+// 滤镜实时呈现帧率（界面右上角）。引擎不存在时返回 -1，界面显示「—」。
+double FilterEngine::PresentFps(int displayIndex)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = lutEngines_.find(displayIndex);
+    if (it != lutEngines_.end() && it->second && it->second->IsRendering())
+        return it->second->PresentFps();
+    return -1.0;
+}
+
+// 详细帧率日志开关：先记录期望值（引擎尚未创建时也能生效），已存在则立即切换。
+void FilterEngine::SetFpsDetail(int displayIndex, bool on)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    fpsDetailByDisplay_[displayIndex] = on;
+    auto it = lutEngines_.find(displayIndex);
+    if (it != lutEngines_.end() && it->second)
+        it->second->SetFpsDetail(on);
+}
+
+// 覆盖层右上角的帧率 OSD：每个在跑的 LUT 引擎各显示自己那台显示器的实时帧率。
+// 由 UI 线程的定时器调用 —— 窗口创建/绘制都发生在拥有它的线程上，无跨线程窗口调用。
+void FilterEngine::UpdateFpsOsd()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& kv : lutEngines_)
+    {
+        LutEngine* eng = kv.second.get();
+        if (!eng) continue;
+        double fps = eng->IsRendering() ? eng->PresentFps() : -1.0;
+        wchar_t buf[32];
+        if (fps < 0.0) wcscpy(buf, L"— FPS");
+        else swprintf(buf, 32, L"%.1f FPS", fps);
+        eng->SetOsdText(buf);
+    }
+}
+
 void FilterEngine::Shutdown()
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -351,7 +392,6 @@ bool FilterEngine::EnsureMagReadyLocked()
 
 std::wstring FilterEngine::RunSelfTest()
 {
-    std::wstring err;
     ComPtr<ID3D11Device> device;
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
@@ -364,9 +404,9 @@ std::wstring FilterEngine::RunSelfTest()
                                D3D11_SDK_VERSION, device.GetAddressOf(), nullptr, nullptr);
     }
     if (FAILED(hr)) return Format(L"D3D11CreateDevice 失败 (0x%08X)", (unsigned)hr);
-    ComPtr<ID3DBlob> blob;
-    if (!CompileShader(g_psLutSource, "main", "ps_4_0", blob, err)) return L"像素着色器编译失败: " + err;
-    if (!CompileShader(g_csLutSource, "CSMain", "cs_5_0", blob, err)) return L"计算着色器编译失败: " + err;
+    // 这里只做设备可用性探测，不再预编译着色器：真正启滤镜时 LutEngine::CreatePipeline
+    // 会编译（且 CompileShader 已按源码缓存）。启动阶段重复编译两遍纯属白花 UI 线程时间，
+    // 也是「刚启动那一下卡顿」的一部分。着色器编译失败会在 LutEngine::Start 返回失败时回退。
     return L"";
 }
 

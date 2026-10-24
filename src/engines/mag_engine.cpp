@@ -133,7 +133,10 @@ MagColorEffect MagEngine::BuildMatrix(const FilterSettings& s)
     float contrast = (float)(s.Contrast / 100.0);                  // 1 = 中性
     float saturation = (float)(s.Saturation / 100.0);              // 1 = 中性
     float highlights = (float)(1.0 + s.Highlights / 100.0 * 0.5);  // 0.5..1.5 增益
-    float shadows = (float)(s.Shadows / 100.0 * 0.5);              // ±0.5
+    // 放大镜是整屏线性矩阵，做不了「按亮度掩码」的亮部/暗部（那是 LUT 与伽马曲线才有的能力），
+    // 只能做整体偏移。旧系数 0.5 时 Shadows=+45 会把整幅画面抬亮 22%，高光直接裁切；
+    // 这里把系数降到 0.2，作为「近似且不过曝」的折中。
+    float shadows = (float)(s.Shadows / 100.0 * 0.2);              // ±0.2
     float temp = (float)(s.Temperature / 100.0);                   // -1..1
 
     float tr = 1.f + 0.18f * temp;

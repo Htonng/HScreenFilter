@@ -43,6 +43,8 @@ namespace hsf {
 // ---------------- 常量 ----------------
 // 窗口类名（与旧版 C# 保持一致，用于 UI 逻辑跳过覆盖层窗口）
 inline const wchar_t* kOverlayWindowClass = L"HScreenFilterVorticeOverlay";
+// 覆盖层右上角帧率 OSD 的窗口类名（独立置顶分层小窗，UI 逻辑同样应跳过它）
+inline const wchar_t* kOsdWindowClass = L"HScreenFilterFpsOsd";
 inline const wchar_t* kAppName = L"HScreenFilter";
 inline const wchar_t* kAppNameCn = L"屏幕滤镜";
 

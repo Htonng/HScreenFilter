@@ -1,5 +1,8 @@
 #include "hlsl.h"
 #include "log.h"
+#include <unordered_map>
+#include <string>
+#include <mutex>
 
 namespace hsf {
 
@@ -11,9 +14,8 @@ VSOutput main(VSInput i) { VSOutput o; o.pos = i.pos; o.uv = i.uv; return o; }
 )HLSL";
 
 // ---------------- 像素着色器：单遍合并（LUT + 可选线性光后处理） ----------------
-// 输入先转到 sRGB 工作空间做 LUT，再转到输出色彩空间。
-// InputMode / OutputMode：0 sRGB / 1 HDR10 PQ / 2 scRGB 线性。
-// 转换带 SDR 白点缩放（scRGB 1.0 = 80nit；HDR10 PQ 满量程 = 10000nit）。
+// 捕获内容与交换链输出统一为 SDR（B8G8R8A8 / sRGB 编码）：工作空间就是 sRGB，
+// 不做任何输入/输出色彩空间转换，也不做 SDR 白点换算（HDR 显示器上的映射交给 Windows）。
 //
 // 单遍合并（性能修复）：
 //   旧实现是两遍 —— 第一遍做 LUT 并把结果写进 R16G16B16A16_FLOAT 中间纹理，
@@ -60,15 +62,7 @@ cbuffer Params : register(b0)
     float PostActive;
 };
 
-cbuffer ColorSpace : register(b1)
-{
-    uint InputMode;
-    uint OutputMode;
-    float2 Pad;
-};
-
 static const float LUT_N = 64.0;
-static const float SDR_TO_HDR = 80.0 / 10000.0;
 static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 float DitherNoise(float2 p)
@@ -90,57 +84,23 @@ float3 LinearToSrgb(float3 c)
     return lerp(lo, hi, step(0.0031308, c));
 }
 
-float3 PqToLinear(float3 pq)
-{
-    const float m1 = 0.1593017578125;
-    const float m2 = 78.84375;
-    const float c1 = 0.8359375;
-    const float c2 = 18.8515625;
-    const float c3 = 18.6875;
-    pq = max(pq, 0.0);
-    float3 p = pow(max(pq, 1e-8), 1.0 / m2);
-    float3 num = max(p - c1, 0.0);
-    float3 den = c2 - c3 * p;
-    return pow(num / max(den, 1e-8), 1.0 / m1);
-}
-
-float3 LinearToPq(float3 lin)
-{
-    const float m1 = 0.1593017578125;
-    const float m2 = 78.84375;
-    const float c1 = 0.8359375;
-    const float c2 = 18.8515625;
-    const float c3 = 18.6875;
-    lin = max(lin, 0.0);
-    float3 y = pow(max(lin, 1e-8), m1);
-    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
-}
-
+// 捕获内容与交换链输出都是 SDR（B8G8R8A8 / sRGB 编码），工作空间就是它本身：
+// 不需要任何输入/输出色彩空间转换，也不需要 SDR 白点换算（Windows 自己负责把
+// SDR 窗口映射到 HDR 显示器）。这里保留同名函数是为了让下面的主函数改动最小。
 float3 InputToSrgbWorking(float3 c)
 {
-    if (InputMode == 1)
-    {
-        float3 lin10000 = PqToLinear(saturate(c));
-        float3 lin80 = lin10000 / SDR_TO_HDR;
-        return LinearToSrgb(saturate(lin80));
-    }
-    if (InputMode == 2)
-        return LinearToSrgb(saturate(c));
     return saturate(c);
 }
 
 float3 SrgbWorkingToOutput(float3 srgb)
 {
-    if (OutputMode == 1)
-        return LinearToPq(SrgbToLinear(saturate(srgb)) * SDR_TO_HDR);
-    if (OutputMode == 2)
-        return SrgbToLinear(saturate(srgb));
     return srgb;
 }
 
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 {
-    float3 work = InputToSrgbWorking(InputTexture.Sample(InputSampler, uv).rgb);
+    float3 raw = InputTexture.Sample(InputSampler, uv).rgb;
+    float3 work = InputToSrgbWorking(raw);
 
     // 可选：线性光空间邻域后处理（数学与原第二遍一致，数据源改为捕获纹理，中间纹理已移除）
     if (PostActive > 0.5)
@@ -181,97 +141,26 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
     float3 lutted = LutTexture.Sample(LutSampler, u).rgb;
     float3 outRgb = SrgbWorkingToOutput(lutted);
 
-    // 仅 SDR 下抖动；HDR PQ/scRGB 空间抖动会在量化处丢失。
-    if (OutputMode == 0)
-    {
-        float2 sp = pos.xy;
-        float3 dither = float3(
-            DitherNoise(sp),
-            DitherNoise(sp + float2(7.1, 3.3)),
-            DitherNoise(sp + float2(11.7, 5.9))) * (2.4 / 255.0) - (1.2 / 255.0);
-        outRgb = saturate(outRgb + dither);
-    }
+    // 8bit 输出抖动：抑制暗部渐变的等高线（±1.2/255）
+    float2 sp = pos.xy;
+    float3 noise = float3(
+        DitherNoise(sp),
+        DitherNoise(sp + float2(7.1, 3.3)),
+        DitherNoise(sp + float2(11.7, 5.9)));
+    outRgb = saturate(outRgb + noise * (2.4 / 255.0) - (1.2 / 255.0));
     return float4(outRgb, 1.0);
 }
 )HLSL";
 
 // ---------------- 像素着色器：中性直通 ----------------
-// 直接采样输入纹理并转到输出色彩空间（保留 HDR 高光，不做 LUT）。
+// 中性直通：直接把捕获内容原样呈现（SDR：B8G8R8A8 进、B8G8R8A8 出，无色彩空间转换）
 const char* g_psPassthroughSource = R"HLSL(
 Texture2D InputTexture : register(t0);
 SamplerState InputSampler : register(s0);
 
-cbuffer ColorSpace : register(b1)
-{
-    uint InputMode;
-    uint OutputMode;
-    float2 Pad;
-};
-
-static const float SDR_TO_HDR = 80.0 / 10000.0;
-
-float3 SrgbToLinear(float3 c)
-{
-    float3 lo = c / 12.92;
-    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
-    return lerp(lo, hi, step(0.04045, c));
-}
-
-float3 LinearToSrgb(float3 c)
-{
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
-    return lerp(lo, hi, step(0.0031308, c));
-}
-
-float3 PqToLinear(float3 pq)
-{
-    const float m1 = 0.1593017578125;
-    const float m2 = 78.84375;
-    const float c1 = 0.8359375;
-    const float c2 = 18.8515625;
-    const float c3 = 18.6875;
-    pq = max(pq, 0.0);
-    float3 p = pow(max(pq, 1e-8), 1.0 / m2);
-    float3 num = max(p - c1, 0.0);
-    float3 den = c2 - c3 * p;
-    return pow(num / max(den, 1e-8), 1.0 / m1);
-}
-
-float3 LinearToPq(float3 lin)
-{
-    const float m1 = 0.1593017578125;
-    const float m2 = 78.84375;
-    const float c1 = 0.8359375;
-    const float c2 = 18.8515625;
-    const float c3 = 18.6875;
-    lin = max(lin, 0.0);
-    float3 y = pow(max(lin, 1e-8), m1);
-    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
-}
-
-float3 InputToLinear(float3 c)
-{
-    if (InputMode == 1)
-        return PqToLinear(saturate(c)) / SDR_TO_HDR; // 80nit 量纲
-    if (InputMode == 2)
-        return c;                                     // 已是 80nit 量纲线性
-    return SrgbToLinear(saturate(c));
-}
-
-float3 LinearToOutput(float3 lin)
-{
-    if (OutputMode == 1)
-        return LinearToPq(max(lin, 0.0) * SDR_TO_HDR);
-    if (OutputMode == 2)
-        return lin;
-    return LinearToSrgb(saturate(lin));
-}
-
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
 {
-    float3 c = InputTexture.Sample(InputSampler, uv).rgb;
-    return float4(LinearToOutput(InputToLinear(c)), 1.0);
+    return float4(InputTexture.Sample(InputSampler, uv).rgb, 1.0);
 }
 )HLSL";
 
@@ -301,10 +190,20 @@ cbuffer Params : register(b0)
     float HueB, SatB, LightB;
     float HueP, SatP, LightP;
     float HueM, SatM, LightM;
-    float4 Padding;
+    float Sharpen;
+    float NoiseReduction;
+    float EdgeEnhancement;
+    float Clarity;
+    float QualityEnhancement;
+    float TexelX;
+    float TexelY;
+    float PostActive;
+    float DarkScene;         // 槽 41：暗场景优化的**用户滑块**强度（0..1，不含场景自适应权重）
+    float DarkSceneWeight;   // 槽 42：场景自适应权重（0.5..1，渲染线程按场景平均亮度维护）
 };
 
 static const float LUT_N = 64.0;
+static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 float wrapHue(float h)
 {
@@ -336,18 +235,24 @@ void rgbToHsl(float3 c, out float h, out float s, out float l)
 }
 
 // —— OKLab/OKLCH（Björn Ottosson 2020 官方参考实现，含健壮性处理）——
+float SrgbToLinear1(float c)
+{
+    return c <= 0.04045 ? c / 12.92 : pow(max((c + 0.055) / 1.055, 0.0), 2.4);
+}
+
+float LinearToSrgb1(float c)
+{
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
+}
+
 float3 SrgbToLinear(float3 c)
 {
-    float3 lo = c / 12.92;
-    float3 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);
-    return lerp(lo, hi, step(0.04045, c));
+    return float3(SrgbToLinear1(c.r), SrgbToLinear1(c.g), SrgbToLinear1(c.b));
 }
 
 float3 LinearToSrgb(float3 c)
 {
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(max(c, 1e-8), 1.0 / 2.4) - 0.055;
-    return lerp(lo, hi, step(0.0031308, c));
+    return float3(LinearToSrgb1(c.r), LinearToSrgb1(c.g), LinearToSrgb1(c.b));
 }
 
 void RgbToOklch(float3 c, out float L, out float C, out float H)
@@ -415,6 +320,25 @@ float isActiveLight(float light)
 
 float4 Evaluate(float3 c)
 {
+    // 暗场景优化（在基础调色之前，先把过暗的输入提亮）：
+    //   亮度曲线 Y' = pow(Y, 1/(1+k))：低端提亮最多、白位固定不动、全程不裁切；
+    //   再把 RGB 按 Y'/Y 整体缩放 → 色相/饱和度保持（不会像向白混合那样把暗部洗成灰）；
+    //   增益上限 6×（纯黑仍是黑，不浮灰雾）。
+    //   强度 = 用户滑块（槽 41）× 场景自适应权重（槽 42）：两者分开传进来，由渲染线程各自维护 ——
+    //   旧实现把乘积算在 LutEngine::Apply() 里，而 Apply 只在界面来消息时被调用，于是
+    //   「场景一亮 → 乘积为 0 → 之后场景再暗也不重建 → 用户一动滑块就静默失效、重启才恢复」。
+    float dsStrength = DarkScene * DarkSceneWeight;
+    if (dsStrength > 0.001)
+    {
+        float Y = dot(saturate(c), LUMA);
+        if (Y > 1e-4)
+        {
+            float e = 1.0 / (1.0 + dsStrength * 1.2);
+            float scale = min(pow(Y, e) / Y, 6.0);
+            c = saturate(c * scale);
+        }
+    }
+
     float h, s, l;
     rgbToHsl(c, h, s, l);
 
@@ -477,11 +401,45 @@ float4 Evaluate(float3 c)
     rgb.g *= 1.0 + 0.04 * Temperature;
     rgb.b *= 1.0 - 0.18 * Temperature;
 
-    rgb = (rgb - 0.5) * Contrast + 0.5 + Brightness;
-    rgb *= 1.0 + Highlights * 0.5;
-    rgb = rgb * (1.0 - Shadows) + Shadows;
+    rgb = saturate((rgb - 0.5) * Contrast + 0.5 + Brightness);
 
-    rgb = saturate(rgb);
+    // —— 高光 / 阴影（线性光亮度域的曝光增益 + 掩码 + 高光软拐点）——
+    // 三个要点，都是旧实现的缺陷所在，别再改回去：
+    //   1) 两段掩码之间留出中间调死区（感知域 0.50 以上阴影为 0，线性光 0.18 以下高光为 0）：
+    //      阴影只抬暗端、高光只压/抬亮端，拖一端不会牵连中灰（旧实现两段掩码在 0.40~0.55
+    //      重叠，没有死区，「高光」实际上从中灰就开始推）。
+    //      两段掩码用的域不同是有意的：高光掩码放在**线性光**域，斜率有界 → 曲线严格单调；
+    //      若放在感知域，sRGB→线性在这一段的斜率放大会把 Y·m' 顶上去，出现「输入更亮、
+    //      输出反而更暗」的色调反转（旧实现就是这种反转，实测在 sRGB 0.8~1.0 之间反转 16%）。
+    //      阴影掩码放在**感知**域：那里 Y·m' 很小，且「暗端」本来就该按看到的亮度划分。
+    //   2) 增益施加在**线性光**上：线性 RGB 等比缩放 = 纯曝光变化，色相与饱和度严格不变；
+    //      直接乘 sRGB 编码值是「伪曝光」，会顺带把饱和度推歪、暗部出现色偏。
+    //      顺带把「高光 −」的力度拉回合理区间：旧实现 sRGB 域把白位压到 0.4（一层灰雾）。
+    //   3) 提亮那一路接软拐点：拐点以上按指数收敛到 1，白位基本不动，高光不再被硬裁成死白
+    //      （旧实现纯乘法 + saturate，+100 只是把亮部推平）。拐点取 1/gain ⇒ gain=1（滑块为 0）时
+    //      这条曲线在 [0,1] 上严格恒等 —— 中性设置绝不能被它改到。
+    float3 lin = SrgbToLinear(rgb);
+    float Y = dot(lin, LUMA);
+    float Lp = LinearToSrgb1(Y);                       // 感知域亮度（0..1）
+    float hiMask = smoothstep(0.18, 0.95, Y);          // 亮端权重（线性光域）
+    float loMask = 1.0 - smoothstep(0.00, 0.50, Lp);   // 暗端权重（感知域）
+    float gain = 1.0 + hiMask * Highlights * 0.5 + loMask * Shadows * 0.9;
+    if (abs(gain - 1.0) > 1e-4 && Y > 1e-6)
+    {
+        float boosted = Y * gain;
+        if (gain > 1.0)
+        {
+            float knee = 1.0 / gain;
+            if (boosted > knee)
+            {
+                float t = (boosted - knee) / (1.0 - knee);
+                boosted = knee + (1.0 - knee) * (1.0 - exp(-t));
+            }
+        }
+        lin *= boosted / Y;
+        rgb = saturate(LinearToSrgb(lin));
+    }
+
     return float4(rgb, 1.0);
 }
 
@@ -522,10 +480,50 @@ static D3DCompiler& Compiler()
     return c;
 }
 
+// 着色器编译缓存（进程级）：
+// 每次启用/重启 LUT 滤镜都会重建管线，d3dcompiler 的 D3DCompile 是纯 CPU 工作，
+// 同一个 cs_5_0 编译一次约几十到数百毫秒。缓存按「源码指针 + 入口 + profile」区分，
+// 源码都是静态字符串，指针稳定。首次编译仍然要付一次成本，之后开关滤镜/看门狗重建
+// 都直接复用 blob —— 这正是「重启几次才不卡」里可以消除的那部分重复开销。
+namespace {
+std::mutex& ShaderCacheMutex()
+{
+    static std::mutex m;
+    return m;
+}
+std::unordered_map<std::string, ComPtr<ID3DBlob>>& ShaderCache()
+{
+    static std::unordered_map<std::string, ComPtr<ID3DBlob>> cache;
+    return cache;
+}
+std::string ShaderCacheKey(const char* source, const char* entry, const char* target)
+{
+    char key[160];
+    snprintf(key, sizeof(key), "%p|%s|%s", (const void*)source, entry, target);
+    return std::string(key);
+}
+} // namespace
+
 bool CompileShader(const char* source, const char* entry, const char* target,
                    ComPtr<ID3DBlob>& blob, std::wstring& error)
 {
     error.clear();
+    if (!source || !entry || !target)
+    {
+        error = L"着色器源码/入口为空";
+        return false;
+    }
+    const std::string key = ShaderCacheKey(source, entry, target);
+    {
+        std::lock_guard<std::mutex> lock(ShaderCacheMutex());
+        auto it = ShaderCache().find(key);
+        if (it != ShaderCache().end() && it->second)
+        {
+            blob = it->second;
+            return true;
+        }
+    }
+
     if (!Compiler().Ensure())
     {
         error = L"无法加载 d3dcompiler_47.dll（系统 DLL 缺失）";
@@ -557,6 +555,10 @@ bool CompileShader(const char* source, const char* entry, const char* target,
         return false;
     }
     blob = pCode;
+    {
+        std::lock_guard<std::mutex> lock(ShaderCacheMutex());
+        ShaderCache()[key] = blob;
+    }
     return true;
 }
 

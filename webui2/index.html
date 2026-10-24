@@ -13,9 +13,11 @@
   <header class="app-header">
     <div class="brand">HScreenFilter</div>
     <div class="engine-status" id="engineStatus">
-      <span class="dot"></span>滤镜引擎：LUT 逐像素引擎
+      <span class="dot"></span><span class="engine-text" id="engineText">滤镜引擎：LUT 逐像素引擎</span>
     </div>
     <button class="btn" id="btnDebug">调试日志</button>
+    <!-- 实时帧率（右上角）：在「配置与快捷键 → 显示滤镜实时帧率」里开关 -->
+    <div class="fps-badge" id="fpsBadge" hidden title="滤镜实时呈现帧率（多次呈现/秒）">— FPS</div>
   </header>
 
   <!-- ═══ 工具栏（两行）：显示器/启用/滤镜总开关 + 全局快捷键 ═══ -->
@@ -35,6 +37,8 @@
         <span class="track"><span class="knob"></span></span>
         <span class="toggle-label">启用滤镜</span>
       </label>
+      <!-- 色彩管道：固定 DXGI 桌面复制 + SDR（B8G8R8A8）输入输出；HDR 显示器上由 Windows 负责映射 -->
+      <div class="color-mode-badge" id="colorModeBadge">DXGI 桌面复制 · SDR</div>
     </div>
     <div class="toolbar-row">
       <button class="btn" id="btnGlobalHotkey">全局开关快捷键…</button>
@@ -77,16 +81,20 @@
             <input type="range" class="flat-range" min="0" max="200" value="100">
           </div>
           <div class="slider-row" data-key="highlights">
-            <div class="slider-label"><span>亮部 Highlights</span><input class="num" type="number" value="0"></div>
+            <div class="slider-label"><span>高光 Highlights</span><input class="num" type="number" value="0"></div>
             <input type="range" class="flat-range" min="-100" max="100" value="0">
           </div>
           <div class="slider-row" data-key="shadows">
-            <div class="slider-label"><span>暗部 Shadows</span><input class="num" type="number" value="0"></div>
+            <div class="slider-label"><span>阴影 Shadows</span><input class="num" type="number" value="0"></div>
             <input type="range" class="flat-range" min="-100" max="100" value="0">
           </div>
           <div class="slider-row" data-key="temperature">
             <div class="slider-label"><span>色温（冷 ← → 暖）</span><input class="num" type="number" value="0"></div>
             <input type="range" class="flat-range" min="-100" max="100" value="0" data-gradient="linear-gradient(to right,#4A90D9,#FFFFFF 50%,#E8862C)">
+          </div>
+          <div class="slider-row" data-key="darkScene">
+            <div class="slider-label"><span>暗场景优化 Dark Scene（暗部提亮·保色相）</span><input class="num" type="number" value="0"></div>
+            <input type="range" class="flat-range" min="0" max="100" value="0">
           </div>
         </div>
         <div class="advanced-block">
@@ -99,12 +107,29 @@
         </div>
         <div class="preset-block">
           <h2>快捷预设</h2>
-          <div class="preset-btns">
-            <button class="btn preset" data-preset="default">默认值</button>
-            <button class="btn preset" data-preset="eye">护眼</button>
-            <button class="btn preset" data-preset="night">夜间</button>
-            <button class="btn preset" data-preset="vivid">鲜艳</button>
+          <div class="preset-group">
+            <span class="preset-group-label">基础</span>
+            <div class="preset-btns">
+              <button class="btn preset" data-preset="default">默认值</button>
+              <button class="btn preset" data-preset="eye">护眼</button>
+              <button class="btn preset" data-preset="night">夜间</button>
+              <button class="btn preset" data-preset="vivid">鲜艳</button>
+              <button class="btn preset" data-preset="game-bright" title="抬黑位 + 略降对比，暗场景/室内一眼看清">游戏暗场景提亮</button>
+              <button class="btn preset" data-preset="arena" title="高对比 + 压黑位 + 锐化，突出轮廓">竞技清晰</button>
+              <button class="btn preset" data-preset="office" title="偏冷、低饱和、轻微提亮，久看不累">冷色办公</button>
+            </div>
           </div>
+          <div class="preset-group">
+            <span class="preset-group-label">LUT</span>
+            <div class="preset-btns">
+              <button class="btn preset" data-preset="hdr" title="高对比 / 高饱和 / 提亮高光并压暗黑位，接近 HDR 观感">HDR 色彩</button>
+              <button class="btn preset" data-preset="cinematic" title="暗部偏青、亮部偏橙，绿降饱和：经典电影配色">电影青橙</button>
+              <button class="btn preset" data-preset="landscape" title="绿/青/蓝加饱和并抬暗部，风景细节更足">风景浓郁</button>
+              <button class="btn preset" data-preset="portrait" title="肤色微提亮 + 降噪柔化，避免过度锐化">人像柔肤</button>
+              <button class="btn preset" data-preset="cyber" title="青蓝紫强化 + 高对比，霓虹夜景感">赛博夜景</button>
+            </div>
+          </div>
+          <p class="advanced-hint">LUT 组预设使用 HSL 分色系与后处理，需要 LUT 引擎（HDR 下会自动启用）。</p>
         </div>
       </section>
 
@@ -112,7 +137,7 @@
       <section class="page" id="page-hsl">
         <div class="page-head">
           <h1>HSL 调色盘</h1>
-          <p>按色系分别精细调整色相、饱和度、明亮度，各色系互不干扰。</p>
+          <p>通过 DXGI 桌面复制捕获，实现逐个像素的细微调整</p>
         </div>
         <div class="hsl-options">
           <label class="toggle-row">
@@ -225,6 +250,11 @@
             <input type="checkbox" id="autoTraySwitch">
             <span class="track"><span class="knob"></span></span>
             <span class="toggle-label">自启后自动进入托盘</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="fpsSwitch">
+            <span class="track"><span class="knob"></span></span>
+            <span class="toggle-label">显示滤镜实时帧率（右上角数字 + 日志每秒帧率明细）</span>
           </label>
         </div>
       </section>

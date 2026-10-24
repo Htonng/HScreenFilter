@@ -36,6 +36,15 @@ public:
     void ResetDisplay(int displayIndex);
     void SetOverlayCapturable(bool capturable);
     void SetVsync(int displayIndex, bool useVsync);
+    // 滤镜实时呈现帧率（界面右上角显示）。返回 -1 表示该显示器当前没有 LUT 引擎
+    //（未启用 / 引擎正在重建），调用方据此显示「—」。
+    double PresentFps(int displayIndex);
+    // 详细帧率日志开关：开启后 LUT 引擎每秒写一条帧率明细（供游戏内抓卡顿）。
+    // 引擎尚未创建时先记录，创建/重建时套用。
+    void SetFpsDetail(int displayIndex, bool on);
+    // 刷新各显示器覆盖层右上角的帧率 OSD（UI 线程每约 500ms 调用一次，
+    // 与界面右上角的数字、详细帧率日志共用同一个开关）。
+    void UpdateFpsOsd();
     void Shutdown();
 
     // 引擎看门狗（UI 线程定期调用，建议每 5 秒一次）：
@@ -80,6 +89,8 @@ private:
     std::map<int, std::unique_ptr<LutEngine>> lutEngines_;
     // 每显示器期望的垂直同步设置（引擎尚未创建时先记录，创建时套用）
     std::map<int, bool> vsyncByDisplay_;
+    // 每显示器期望的详细帧率日志开关（界面「显示滤镜实时帧率」）
+    std::map<int, bool> fpsDetailByDisplay_;
     // 每显示器最后一次应用的参数（看门狗用）
     std::map<int, AppliedState> appliedByDisplay_;
     FilterSettings lastGammaSettings_;   // 伽马引擎最后应用的参数（看门狗比对用）

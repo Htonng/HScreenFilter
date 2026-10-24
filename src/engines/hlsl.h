@@ -13,6 +13,9 @@ namespace hsf {
 // 9..32  : 8 个色系 × (Hue, Sat, Light)
 // 33..39 : Sharpen / NoiseReduction / EdgeEnhancement / Clarity / QualityEnhancement / TexelX / TexelY
 // 40     : PostActive（0/1：五项后处理参数是否全部为 0，用于单遍着色器的快路径分支）
+// 41     : DarkScene（暗场景优化的用户滑块强度 0..1；0 = 关闭）
+// 42     : DarkSceneWeight（场景自适应权重 0.5..1，渲染线程按场景平均亮度维护；
+//                        着色器里与槽 41 相乘得到有效强度）
 constexpr int kParamsFloatCount = 44;
 constexpr int kLutSize = 64;
 

@@ -396,7 +396,7 @@ void MainWindow::BuildPageBase()
     AddStatic(0, L"基础调节", x, y, 150, 26, 15, true);
     AddStatic(0, L"拖动滑块即可实时调整滤镜的亮度、对比度、色彩和阴影表现。", x + 156, y + 2, w - 156, 20, 11);
     static const wchar_t* names[6] = { L"亮度 Brightness", L"对比度 Contrast", L"鲜艳度 Saturation",
-                                       L"亮部 Highlights", L"暗部 Shadows", L"色温（冷 ← → 暖）" };
+                                       L"高光 Highlights", L"阴影 Shadows", L"色温（冷 ← → 暖）" };
     static const double mins[6] = { -100, 0, 0, -100, -100, -100 };
     static const double maxs[6] = { 100, 200, 200, 100, 100, 100 };
     y += 38;

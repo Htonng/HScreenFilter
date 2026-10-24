@@ -55,10 +55,14 @@ static int RunEngineTest(int seconds = 4, bool overlayCycle = false)
     }
     out(L"[ OK ] 引擎探测通过，kind=" + NumToStr((double)(int)fe.Kind()));
 
-    // 非中性设置：亮度 -20 + 红色系色相 +30
+    // 非中性设置：亮度 -20 + 红色系色相 +30 + 暗场景优化 60
+    // DarkSceneBoost 是特意加的：它会把「场景探测 → 自适应权重 → LUT 重建」这条链路跑起来，
+    // 正是「场景一亮权重就锁死、一动参数暗场景优化就失效」那个回归的覆盖点
+    // （日志里应能看到「暗场景优化：场景平均亮度=… → 自适应权重=…」）。
     FilterSettings s;
     s.Brightness = -20;
     s.Contrast = 110;
+    s.DarkSceneBoost = 60;
     if (auto* ch = s.FindChannel(HslChannelNames::Red)) ch->Hue = 30;
 
     if (!fe.Apply(0, monitors[0], s))
@@ -68,8 +72,13 @@ static int RunEngineTest(int seconds = 4, bool overlayCycle = false)
     }
     out(L"[ OK ] 引擎已应用（LUT 覆盖层启动）");
 
+    // 详细帧率日志：每秒一条（呈现帧率 / 帧间隔 / 长间隔 / 取帧+处理耗时），
+    // 正好覆盖「界面显示滤镜实时帧率」开关打开后的那条代码路径。
+    fe.SetFpsDetail(0, true);
+
     // 运行指定秒数（渲染线程重建 LUT 并呈现）
     PumpSleep(seconds * 1000);
+    out(L"[INFO] 呈现帧率 = " + NumToStr(fe.PresentFps(0)) + L" 帧/秒（详细帧率日志见应用日志）");
 
     // 覆盖层隐藏/恢复回归测试：捕获中断期间覆盖层会被隐藏，必须验证
     // 「隐藏时不呈现（flip 交换链不阻塞）」且「恢复后继续呈现」。

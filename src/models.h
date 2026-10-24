@@ -64,6 +64,10 @@ struct FilterSettings
     double EdgeEnhancement = 0.0;
     double Clarity = 0.0;
     double QualityEnhancement = 0.0;
+    // 暗场景优化（0..100）：把过暗的画面提亮（保色相、白位不动），0 = 关闭。
+    // LUT 引擎按场景亮度做温和自适应（最低保留 50%，滑块永远不会被静默清零）；
+    // 伽马引擎没有场景采样，按滑块全额生效。仅 LUT / 伽马引擎支持（放大镜是线性矩阵做不到）。
+    double DarkSceneBoost = 0.0;
 
     std::wstring ActiveHslChannel = HslChannelNames::Master;
 
@@ -107,7 +111,7 @@ struct FilterSettings
         if (Brightness != 0 || Contrast != 100 || Saturation != 100 ||
             Highlights != 0 || Shadows != 0 || Temperature != 0 ||
             Sharpen != 0 || NoiseReduction != 0 || EdgeEnhancement != 0 ||
-            Clarity != 0 || QualityEnhancement != 0) return false;
+            Clarity != 0 || QualityEnhancement != 0 || DarkSceneBoost != 0) return false;
         if (Hue != 0 || HslSaturation != 100 || Lightness != 0) return false;
         for (const auto& c : HslChannels)
             if (!c.IsNeutral()) return false;
@@ -121,7 +125,7 @@ struct FilterSettings
                Saturation == 100 && Contrast == 100 && Brightness == 0 &&
                Temperature == 0 && Highlights == 0 && Shadows == 0 &&
                Sharpen == 0 && NoiseReduction == 0 && EdgeEnhancement == 0 &&
-               Clarity == 0 && QualityEnhancement == 0;
+               Clarity == 0 && QualityEnhancement == 0 && DarkSceneBoost == 0;
     }
 
     JsonValue ToJson() const;
@@ -214,6 +218,8 @@ struct ProfileData
     std::vector<DisplayState> Displays;
     std::wstring Theme = L"default";
     bool Captureable = false;
+    // 界面「显示滤镜实时帧率」：右上角显示实时帧率，并在日志里每秒写一条帧率明细
+    bool ShowFps = false;
     bool PerAppEnabled = false;
     std::vector<AppBinding> AppBindings;
 
@@ -231,6 +237,10 @@ inline constexpr int ModWin = 0x8;
 
 std::wstring KeyName(int vk);
 std::wstring Format(int modifiers, int key);
+// 带扫描码/扩展位：小键盘的 - . / Enter 与主键区的 M . / 共用同一 VK，
+// 只有扫描码能区分，因此捕获时用这两个函数生成显示名。
+std::wstring KeyNameEx(int vk, int scanCode, bool extended);
+std::wstring FormatEx(int modifiers, int key, int scanCode, bool extended);
 } // namespace HotkeyText
 
 } // namespace hsf

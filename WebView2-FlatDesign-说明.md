@@ -36,6 +36,13 @@ powershell: .\build\webview2_demo.exe
 min=max 轨道尺寸把窗口强制回 680x860 物理像素，125% 缩放下窗口只有设计尺寸的 80%。
 修复：使用按 DPI 缩放后的实际外框尺寸。
 
+**补充（2026-10-22）：自启进托盘时的第二次白屏。**
+`--autostart` + 「自启后自动进入托盘」路径下，主窗口从未 `ShowWindow` 过，而控制器仍是在
+这个未显示的窗口上创建的。WebView2 会正常导航、JS 也会发 `ready`，但不会建立可见合成表面；
+之后从托盘恢复只得到白底窗口。修复：自启时先把窗口用 `SW_SHOWNOACTIVATE` 显示在屏幕外，
+页面 `ready` 后再隐藏并归位；`ShowWindowApp` 恢复时显式 `put_IsVisible(TRUE)` + `put_Bounds`。
+这与上面「先 ShowWindow 再创建控制器」是同一条约束，发布版也必须遵守。
+
 **验证（当前全部通过）：**
 - 浏览器进程持续存活（12s 轮询）
 - `[nav-start]` → `[nav] success=1`
