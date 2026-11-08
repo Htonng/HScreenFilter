@@ -2,22 +2,53 @@
 
 namespace hsf {
 
+// ---------------- FilterParams ----------------
+// 顺序 = 界面上「基础」组的排列顺序；Advanced=true 的项排在后半段。
+// 注意：JsonKey 是 profiles.json 的冻结字段名，不要因为改 UI 文案而重命名。
+const std::vector<FilterParams::Def>& FilterParams::All()
+{
+    static const std::vector<Def> kDefs = {
+        { L"brightness",        L"亮度 Brightness",                 L"Brightness",        -100, 100, 0,   &FilterSettings::Brightness,        false },
+        { L"contrast",          L"对比度 Contrast",                 L"Contrast",             0, 200, 100, &FilterSettings::Contrast,          false },
+        { L"saturation",        L"鲜艳度 Saturation",               L"Saturation",           0, 200, 100, &FilterSettings::Saturation,        false },
+        { L"highlights",        L"高光 Highlights",                 L"Highlights",        -100, 100, 0,   &FilterSettings::Highlights,        false },
+        { L"shadows",           L"阴影 Shadows",                    L"Shadows",           -100, 100, 0,   &FilterSettings::Shadows,           false },
+        { L"temperature",       L"色温（冷 ← → 暖）",               L"Temperature",       -100, 100, 0,   &FilterSettings::Temperature,       false },
+        { L"darkScene",         L"暗场景优化 Dark Scene（暗部提亮·保色相）", L"DarkSceneBoost", 0, 100, 0,  &FilterSettings::DarkSceneBoost,    false },
+        { L"sharpen",           L"锐化 Sharpen",                    L"Sharpen",              0, 100, 0,   &FilterSettings::Sharpen,           true },
+        { L"noiseReduction",    L"降噪 Noise Reduction",            L"NoiseReduction",       0, 100, 0,   &FilterSettings::NoiseReduction,    true },
+        { L"edgeEnhancement",   L"边缘增强 Edge Enhancement",       L"EdgeEnhancement",      0, 100, 0,   &FilterSettings::EdgeEnhancement,   true },
+        { L"clarity",           L"清晰度 Clarity",                  L"Clarity",              0, 100, 0,   &FilterSettings::Clarity,           true },
+        { L"qualityEnhancement", L"画质增强 Quality Enhancement",   L"QualityEnhancement",    0, 100, 0,   &FilterSettings::QualityEnhancement, true },
+    };
+    return kDefs;
+}
+
+const FilterParams::Def* FilterParams::Find(const std::wstring& key)
+{
+    for (const auto& def : All())
+        if (key == def.Key) return &def;
+    return nullptr;
+}
+
+void FilterParams::Set(FilterSettings& s, const Def& def, double value)
+{
+    if (!(value == value)) value = def.Default;   // NaN → 默认值
+    s.*def.Member = Clamp(value, def.Min, def.Max);
+}
+
+double FilterParams::Get(const FilterSettings& s, const Def& def)
+{
+    return s.*def.Member;
+}
+
 // ---------------- FilterSettings ----------------
 JsonValue FilterSettings::ToJson() const
 {
     JsonValue j = JsonValue::ObjectValue();
-    j.Set(L"Brightness", JsonValue::NumValue(Brightness));
-    j.Set(L"Contrast", JsonValue::NumValue(Contrast));
-    j.Set(L"Saturation", JsonValue::NumValue(Saturation));
-    j.Set(L"Highlights", JsonValue::NumValue(Highlights));
-    j.Set(L"Shadows", JsonValue::NumValue(Shadows));
-    j.Set(L"Temperature", JsonValue::NumValue(Temperature));
-    j.Set(L"Sharpen", JsonValue::NumValue(Sharpen));
-    j.Set(L"NoiseReduction", JsonValue::NumValue(NoiseReduction));
-    j.Set(L"EdgeEnhancement", JsonValue::NumValue(EdgeEnhancement));
-    j.Set(L"Clarity", JsonValue::NumValue(Clarity));
-    j.Set(L"QualityEnhancement", JsonValue::NumValue(QualityEnhancement));
-    j.Set(L"DarkSceneBoost", JsonValue::NumValue(DarkSceneBoost));
+    // 基础参数由同一张元数据表驱动：字段名/默认值/范围只有一处定义。
+    for (const auto& def : FilterParams::All())
+        j.Set(def.JsonKey, JsonValue::NumValue(FilterParams::Get(*this, def)));
     j.Set(L"ActiveHslChannel", JsonValue::StrValue(ActiveHslChannel));
     j.Set(L"Hue", JsonValue::NumValue(Hue));
     j.Set(L"HslSaturation", JsonValue::NumValue(HslSaturation));
@@ -39,18 +70,9 @@ JsonValue FilterSettings::ToJson() const
 
 void FilterSettings::FromJson(const JsonValue& j)
 {
-    Brightness = j.GetNumber(L"Brightness", 0);
-    Contrast = j.GetNumber(L"Contrast", 100);
-    Saturation = j.GetNumber(L"Saturation", 100);
-    Highlights = j.GetNumber(L"Highlights", 0);
-    Shadows = j.GetNumber(L"Shadows", 0);
-    Temperature = j.GetNumber(L"Temperature", 0);
-    Sharpen = j.GetNumber(L"Sharpen", 0);
-    NoiseReduction = j.GetNumber(L"NoiseReduction", 0);
-    EdgeEnhancement = j.GetNumber(L"EdgeEnhancement", 0);
-    Clarity = j.GetNumber(L"Clarity", 0);
-    QualityEnhancement = j.GetNumber(L"QualityEnhancement", 0);
-    DarkSceneBoost = j.GetNumber(L"DarkSceneBoost", 0);
+    // 旧配置缺字段/超范围都在这里归一化：引擎永远拿不到越界参数。
+    for (const auto& def : FilterParams::All())
+        FilterParams::Set(*this, def, j.GetNumber(def.JsonKey, def.Default));
     ActiveHslChannel = j.GetString(L"ActiveHslChannel", HslChannelNames::Master);
     Hue = j.GetNumber(L"Hue", 0);
     HslSaturation = j.GetNumber(L"HslSaturation", 100);

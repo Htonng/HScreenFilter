@@ -2,7 +2,9 @@
 // 数据：profiles.json（与原版兼容）；引擎：FilterEngine 实时应用；
 // 功能：配置 CRUD/导入导出、按应用切换（前台监听）、快捷键（捕获+注册）、自启、托盘。
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <shellapi.h>
 #include <shlwapi.h>
@@ -162,18 +164,9 @@ static void DrainUiQueue()
 
 static void SetBaseValue(FilterSettings &s, const std::wstring &key, double v)
 {
-    if (key == L"brightness") s.Brightness = v;
-    else if (key == L"contrast") s.Contrast = v;
-    else if (key == L"saturation") s.Saturation = v;
-    else if (key == L"highlights") s.Highlights = v;
-    else if (key == L"shadows") s.Shadows = v;
-    else if (key == L"temperature") s.Temperature = v;
-    else if (key == L"sharpen") s.Sharpen = v;
-    else if (key == L"noiseReduction") s.NoiseReduction = v;
-    else if (key == L"edgeEnhancement") s.EdgeEnhancement = v;
-    else if (key == L"clarity") s.Clarity = v;
-    else if (key == L"qualityEnhancement") s.QualityEnhancement = v;
-    else if (key == L"darkScene") s.DarkSceneBoost = v;
+    // 范围与字段映射统一在 models.cpp 的 FilterParams 表里；未知键直接忽略而不是静默写错字段。
+    if (const auto *def = FilterParams::Find(key)) FilterParams::Set(s, *def, v);
+    else AppLog(L"[bridge] 未知基础参数 key=%s（已忽略）", key.c_str());
 }
 
 static void SetHslValue(FilterSettings &s, int channel, int field, double value)
@@ -349,19 +342,8 @@ static void ApplyLutMode(bool useLut)
 
 static bool SettingsEqual(const FilterSettings &a, const FilterSettings &b)
 {
-    if (a.Brightness != b.Brightness || a.Contrast != b.Contrast || a.Saturation != b.Saturation ||
-        a.Highlights != b.Highlights || a.Shadows != b.Shadows || a.Temperature != b.Temperature ||
-        a.Sharpen != b.Sharpen || a.NoiseReduction != b.NoiseReduction ||
-        a.EdgeEnhancement != b.EdgeEnhancement || a.Clarity != b.Clarity ||
-        a.QualityEnhancement != b.QualityEnhancement) return false;
-    if (a.Hue != b.Hue || a.HslSaturation != b.HslSaturation || a.Lightness != b.Lightness) return false;
-    if (a.HslChannels.size() != b.HslChannels.size()) return false;
-    for (size_t i = 0; i < a.HslChannels.size(); i++)
-    {
-        const auto &x = a.HslChannels[i], &y = b.HslChannels[i];
-        if (x.Name != y.Name || x.Hue != y.Hue || x.Saturation != y.Saturation || x.Lightness != y.Lightness) return false;
-    }
-    return true;
+    // 统一走 models.h 的 FilterSettings::Equals（包含 DarkSceneBoost 与全部 HSL 通道）。
+    return a.Equals(b);
 }
 static std::wstring ActiveProfileName()
 {
@@ -982,19 +964,10 @@ static void RequestInitialApply()
 // ---------------------------------------------------------------------------
 static JsonValue SettingsToJson(const FilterSettings &s)
 {
+    // 基础参数只从元数据表生成，新增参数不需要再改这里。
     JsonValue base = JsonValue::ObjectValue();
-    base.Set(L"brightness", JsonValue::NumValue(s.Brightness));
-    base.Set(L"contrast", JsonValue::NumValue(s.Contrast));
-    base.Set(L"saturation", JsonValue::NumValue(s.Saturation));
-    base.Set(L"highlights", JsonValue::NumValue(s.Highlights));
-    base.Set(L"shadows", JsonValue::NumValue(s.Shadows));
-    base.Set(L"temperature", JsonValue::NumValue(s.Temperature));
-    base.Set(L"sharpen", JsonValue::NumValue(s.Sharpen));
-    base.Set(L"noiseReduction", JsonValue::NumValue(s.NoiseReduction));
-    base.Set(L"edgeEnhancement", JsonValue::NumValue(s.EdgeEnhancement));
-    base.Set(L"clarity", JsonValue::NumValue(s.Clarity));
-    base.Set(L"qualityEnhancement", JsonValue::NumValue(s.QualityEnhancement));
-    base.Set(L"darkScene", JsonValue::NumValue(s.DarkSceneBoost));
+    for (const auto &def : FilterParams::All())
+        base.Set(def.Key, JsonValue::NumValue(FilterParams::Get(s, def)));
     JsonValue master = JsonValue::ObjectValue();
     master.Set(L"h", JsonValue::NumValue(s.Hue));
     master.Set(L"s", JsonValue::NumValue(s.HslSaturation));
@@ -1096,6 +1069,22 @@ static JsonValue BuildStatePayload(const wchar_t *type)
     }
     j.Set(L"bindings", std::move(bindings));
     j.Set(L"settings", SettingsToJson(CurDisplay().Current));
+
+    // 参数元数据：网页据此生成滑块、决定范围/默认值/分组，避免两端范围表漂移。
+    JsonValue paramDefs = JsonValue::ArrayValue();
+    for (const auto &def : FilterParams::All())
+    {
+        JsonValue d = JsonValue::ObjectValue();
+        d.Set(L"key", JsonValue::StrValue(def.Key));
+        d.Set(L"label", JsonValue::StrValue(def.Label));
+        d.Set(L"jsonKey", JsonValue::StrValue(def.JsonKey));
+        d.Set(L"min", JsonValue::NumValue(def.Min));
+        d.Set(L"max", JsonValue::NumValue(def.Max));
+        d.Set(L"default", JsonValue::NumValue(def.Default));
+        d.Set(L"advanced", JsonValue::BoolValue(def.Advanced));
+        paramDefs.arr.push_back(std::move(d));
+    }
+    j.Set(L"params", std::move(paramDefs));
     return j;
 }
 
@@ -1235,7 +1224,14 @@ static void HandleMessage(JsonValue &msg)
         }
         else if (id == L"vsync") { CurDisplay().UseVsync = v; if (data_.UseDxgi && CurDisplay().IsEnabled) FilterEngine::Instance().SetVsync(curDisplay_, v); SendDirtyState(); }
         else if (id == L"perapp") { data_.PerAppEnabled = v; UpdateWatcher(); ApplyCurrent(); SaveState(); }
-        else if (id == L"capture") { data_.Captureable = v; FilterEngine::Instance().SetOverlayCapturable(v); SaveState(); }
+        else if (id == L"capture")
+        {
+            // 固定关闭：覆盖层可捕获 = 被自己的桌面复制抓到 = 全黑反馈。
+            if (v) SendStatus(L"hint", L"LUT 覆盖层必须排除自身捕获，「允许捕获」已禁用");
+            data_.Captureable = false;
+            FilterEngine::Instance().SetOverlayCapturable(false);
+            SaveState();
+        }
         else if (id == L"showfps")
         {
             // 显示滤镜实时帧率：右上角显示 + 日志每秒一条帧率明细（抓游戏内卡顿用）
@@ -1908,8 +1904,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     // 自启状态以注册表为准（旧版本可能只写了注册表没写配置，或用户手动删除了项）
     data_.AutoStart = AutoStart::IsEnabled();
     if (data_.Theme != L"light" && data_.Theme != L"dark") data_.Theme = L"auto";
-    if (cliCapturable) data_.Captureable = true;
-    if (cliNoCapturable) data_.Captureable = false;
+    // Captureable 是旧配置/命令行字段，保留 JSON 兼容，但 LUT 覆盖层不允许参与捕获：
+    // 覆盖层一旦对 DXGI 桌面复制可见，滤镜就会捕获自己的输出并迅速全黑。
+    // 这里强制关闭并保留一条日志，避免旧 profiles.json 里 Captureable=true 的用户继续黑屏。
+    bool captureRequested = data_.Captureable || cliCapturable;
+    if (captureRequested)
+        AppLog(L"[engine] 已忽略「允许捕获」：LUT 覆盖层必须排除自身捕获，否则会自反馈全黑");
+    data_.Captureable = false;
+    (void)cliNoCapturable;
     InitializeDisplays();
     savedSnapshot_ = CurDisplay().Current.Clone();
     savedUseDxgi_ = data_.UseDxgi;

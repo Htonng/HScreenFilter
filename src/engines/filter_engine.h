@@ -67,8 +67,18 @@ public:
 private:
     FilterEngine() = default;
     bool EnsureMagReadyLocked();
-    void StopAll();
     bool InitializeLocked(); // 调用方必须已持有 mutex_
+    // 三层互斥：任何时刻只允许一个后端在屏幕上生效。
+    // 旧实现按显示器逐个建立 LUT 引擎，一旦某台显示器启动失败就把全局 kind_ 改成
+    // 放大镜/伽马，但先前已启动的 LUT 覆盖层仍在呈现 —— 同一画面被 LUT 与放大镜
+    // 各处理一次，表现为「多层效果叠加」；反向切换时残留的伽马表也会叠在 LUT 上。
+    // 下面三个函数把「停掉某一层」收敛成唯一入口，并在切换后端时强制清场。
+    void StopLutEnginesLocked();
+    void StopNonLutLayersLocked(bool force = false);
+    bool ApplyFallbackLocked(const FilterSettings& s);
+    bool InitializeFallbackLocked(); // 选择放大镜/Gamma（不应用参数）
+
+    void StopAll();
 
     // 每个显示器最后一次成功应用的参数（看门狗重建引擎时复用）
     struct AppliedState
@@ -84,6 +94,7 @@ private:
     std::wstring lastError_;
     MagEngine mag_;
     bool magUsed_ = false;
+    bool nonLutLayersOn_ = false;   // 放大镜/伽马当前是否真的在屏幕上生效
 
     // 每显示器一个 LUT 引擎
     std::map<int, std::unique_ptr<LutEngine>> lutEngines_;

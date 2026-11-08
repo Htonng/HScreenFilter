@@ -1,6 +1,7 @@
 // comptr.h — 极简 COM 智能指针（仅系统 DLL，无第三方依赖）。
 #pragma once
 #include <unknwn.h>
+#include <memory>
 
 namespace hsf {
 
@@ -21,7 +22,7 @@ public:
 
     ComPtr& operator=(const ComPtr& other)
     {
-        if (this != &other)
+        if (this != std::addressof(other))
         {
             T* p = other.ptr_;
             if (p) p->AddRef();
@@ -31,7 +32,7 @@ public:
     }
     ComPtr& operator=(ComPtr&& other) noexcept
     {
-        if (this != &other) { Reset(); ptr_ = other.ptr_; other.ptr_ = nullptr; }
+        if (this != std::addressof(other)) { Reset(); ptr_ = other.ptr_; other.ptr_ = nullptr; }
         return *this;
     }
     ComPtr& operator=(T* p)

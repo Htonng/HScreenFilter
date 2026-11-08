@@ -118,6 +118,30 @@ struct FilterSettings
         return true;
     }
 
+    // 完整比较（保存快照/脏检测专用）。
+    // 旧实现手写比较时漏掉了 DarkSceneBoost，导致「只改暗场景优化」永远不会弹保存条，
+    // 重启后参数回到上一次保存值。以后新增字段必须同步进 Equals。
+    bool Equals(const FilterSettings& o) const
+    {
+        if (Brightness != o.Brightness || Contrast != o.Contrast || Saturation != o.Saturation ||
+            Highlights != o.Highlights || Shadows != o.Shadows || Temperature != o.Temperature ||
+            Sharpen != o.Sharpen || NoiseReduction != o.NoiseReduction ||
+            EdgeEnhancement != o.EdgeEnhancement || Clarity != o.Clarity ||
+            QualityEnhancement != o.QualityEnhancement || DarkSceneBoost != o.DarkSceneBoost)
+            return false;
+        if (Hue != o.Hue || HslSaturation != o.HslSaturation || Lightness != o.Lightness) return false;
+        if (ActiveHslChannel != o.ActiveHslChannel) return false;
+        if (HslChannels.size() != o.HslChannels.size()) return false;
+        for (const auto& c : HslChannels)
+        {
+            const HslChannel* other = o.FindChannel(c.Name);
+            if (!other || !(c.Hue == other->Hue && c.Saturation == other->Saturation &&
+                            c.Lightness == other->Lightness))
+                return false;
+        }
+        return true;
+    }
+
     // 旧版 IsDefaultSettings 语义（用于迁移判断，只查基础项）
     bool IsDefaultBasic() const
     {
@@ -131,6 +155,29 @@ struct FilterSettings
     JsonValue ToJson() const;
     void FromJson(const JsonValue& j);
 };
+
+// ---------------- 基础参数元数据（唯一事实来源） ----------------
+// 目的：参数键名、范围、默认值、JSON 字段名不再散落在 app_main.cpp / webui2/app.js。
+// 新增一个基础参数 = 在 models.cpp 的 kDefs 表里加一行 + 在引擎映射里消费它；
+// 宿主会通过 init/sync 把整张表下发给网页，网页据此生成滑块并 clamp。
+namespace FilterParams {
+struct Def
+{
+    const wchar_t* Key;       // 网页/桥接使用的参数键（camelCase）
+    const wchar_t* Label;     // 中文标签（网页兜底标签）
+    const wchar_t* JsonKey;   // profiles.json 中的字段名（兼容旧数据，禁止随意改）
+    double Min;
+    double Max;
+    double Default;
+    double FilterSettings::* Member;
+    bool Advanced;            // true = 仅 LUT 后处理生效，界面放在「高级调整」
+};
+
+const std::vector<Def>& All();
+const Def* Find(const std::wstring& key);
+void Set(FilterSettings& s, const Def& def, double value); // 按 Min/Max 夹取后写入
+double Get(const FilterSettings& s, const Def& def);
+} // namespace FilterParams
 
 // ---------------- 显示器 ----------------
 struct DisplayMonitor

@@ -1,4 +1,4 @@
-# build.ps1 - Build HScreenFilter (C++ port) with the portable llvm-mingw toolchain.
+﻿# build.ps1 - Build HScreenFilter (C++ port) with the portable llvm-mingw toolchain.
 # Usage: .\build.ps1
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -9,6 +9,7 @@ if (-not $tc -or -not (Test-Path $tc)) {
     $candidates = @(
         "$root\tools\llvm-mingw-beta\llvm-mingw-20260616-ucrt-x86_64",
         "F:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
+        "D:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "$env:LOCALAPPDATA\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "C:\llvm-mingw"
     )
@@ -38,6 +39,9 @@ $srcs = @(
     "src\tray.cpp",
     "src\fgwatcher.cpp",
     "src\engines\hlsl.cpp",
+    "src\engines\render\desktop_capture.cpp",
+    "src\engines\render\color_processor.cpp",
+    "src\engines\render\overlay_presenter.cpp",
     "src\engines\lut_engine.cpp",
     "src\engines\mag_engine.cpp",
     "src\engines\gamma_engine.cpp",
@@ -61,8 +65,7 @@ function Invoke-Native {
         [string]$LogPath
     )
     $errPath = "$LogPath.err"
-    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
     if (Test-Path $LogPath) { Get-Content -LiteralPath $LogPath -Raw | Write-Host }
     if (Test-Path $errPath) { Get-Content -LiteralPath $errPath -Raw | Write-Host }
     Remove-Item -LiteralPath $LogPath, $errPath -Force -ErrorAction SilentlyContinue

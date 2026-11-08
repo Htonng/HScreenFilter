@@ -1,5 +1,89 @@
 # Changelog
 
+## v2.3.1 (2026-11-08)
+
+### 修复「打开滤镜全黑屏」
+
+发布前回归发现两个独立根因，都会让 LUT 覆盖层显示黑色：
+
+- **工作纹理继承了 DXGI 捕获源的共享/键控互斥标志。**
+  `DesktopCapture::EnsureWorkTexture` 一开始直接复制源纹理 desc，DXGI 桌面复制的源
+  带 `MiscFlags=0x2900`（共享 + shared NTHANDLE/keyed mutex）。目标工作纹理跟着变成
+  共享键控互斥纹理后，`CopyResource` 在未获取 keyed mutex 时静默失败：场景探测读
+  **源帧**有内容（平均亮度 0.88），工作纹理中心却一直是 0，渲染自检输入/输出全黑。
+  旧实现的工作纹理是固定 desc（`MiscFlags=0`），分层重构时漏掉了这一点。
+  修复：工作纹理固定 `Usage=DEFAULT / BindFlags=SHADER_RESOURCE / MiscFlags=0 /
+  CPUAccessFlags=0`，并在复用前校验 desc；不再继承源纹理的共享标志。
+- **`Captureable=true` 时覆盖层被自己的桌面复制捕获。**
+  `WDA_MONITOR` 允许第三方录制，同时也让本进程的 DXGI 桌面复制抓到覆盖层自身；
+  首帧后形成「黑 → 捕获黑 → 输出更黑」的自反馈，整个屏幕变黑。该字段来自旧配置/
+  `--capturable`，界面没有开关，用户升级后很容易中招。
+  修复：LUT 覆盖层固定 `WDA_EXCLUDEFROMCAPTURE`，`Captureable` 仅保留 JSON 兼容；
+  启动时检测到旧配置为 true 会记一条日志并强制关闭。底层原因决定「允许捕获」与
+  「用桌面复制做滤镜」不可共存，不能靠时序规避。
+- 验证：`--enginetest=8` 自检 `输出 R=242 G=242 B=242 / 输入 R=255`；发布版在
+  `Captureable=true` 的旧配置下启动，自检 `输出/输入 R=243 G=245 B=249`，画面正常，
+  日志出现「已忽略允许捕获」与「WDA_EXCLUDEFROMCAPTURE（强制）」。
+
+## v2.3.0 (2026-11-08)
+
+### 修复「调完亮度再点其它选项，画风突然骤变 / 效果叠加或缺失」
+
+- **根因一：LUT 与低层后端同屏叠加。** `FilterEngine::Apply` 按显示器逐个创建
+  `LutEngine`，某台显示器 `Start` 失败时只把全局 `kind_` 改成放大镜/伽马，**已经启动的
+  LUT 覆盖层仍在呈现**。同一桌面先被 LUT 处理一次、再被放大镜/伽马处理一次；多显示器、
+  驱动/捕获偶发失败时最容易出现。现在任何 LUT 启动失败都会先 `StopLutEnginesLocked()`
+  拆除全部覆盖层，再整体回退；非 LUT 后端每次 Apply 前也会防御性清场。
+- **根因二：切换后端时残留伽马/放大镜。** `SetDeviceGammaRamp` 不随进程退出自动恢复，
+  上次异常退出留下的曲线会叠在 LUT 输出上（表现为「打开滤镜画面发灰/对比度不对」）。
+  进入 LUT 前现在强制 `StopNonLutLayersLocked(true)`，无条件复位放大镜 + 伽马表；
+  `Reset()` 也不再只在 `kind_==GammaRamp` 时复位伽马。
+- **根因三：LUT 回退后无法重试。** `SetUseDxgi` 旧实现只比较值，LUT 因启动失败回退到
+  放大镜后，用户再次打开 LUT 会被 early-return 卡在「开关是开、实际跑放大镜」。
+  现在同时比较当前后端，值相同但后端不匹配时会真正重新探测/启动。
+- **根因四：场景探测/参数重建路径互相踩。** 暗场景权重、LUT 重建、中性直通原本分散在
+  一个 2000 行类里，`neutral_`/`paramsDirty_`/覆盖层可见性互相影响。本次按层拆开后，
+  参数只经 `ColorProcessor`、呈现只经 `OverlayPresenter`、捕获只经 `DesktopCapture`，
+  三层不共享内部状态。
+
+### 暗场景配置写入 `profiles.json`
+
+- `FilterSettings::Equals` 补上 `DarkSceneBoost`。旧的手写比较漏掉该字段，导致**只改
+  暗场景优化时 `IsDirty()` 永远为 false**：不弹保存条，重启后参数回到上次保存值。
+- 基础参数统一由 `FilterParams::All()` 元数据表驱动：JSON 字段名、范围、默认值、
+  `Equals`/夹取只有一处定义；`FromJson` 对旧配置/导入文件做范围夹取，非法值不会进引擎。
+- 暗场景滑块随配置保存/导出/导入；场景自适应权重仍是运行时量，只写常量缓冲槽 42，
+  不进 JSON（避免把「当前场景亮度」误存成用户配置）。
+
+### 渲染分层（长期维护）
+
+- 新增 `src/engines/render/`：
+  - `desktop_capture.*` — DXGI 桌面复制、固定 BGRA8 工作纹理、异格式/全黑诊断、
+    延迟一帧的场景采样；
+  - `color_processor.*` — `FilterSettings` → 44 float 常量缓冲、64³ LUT 重建限速、
+    中性直通、暗场景权重、单遍像素着色器；
+  - `overlay_presenter.*` — 覆盖层窗口、flip 交换链、按缓冲身份缓存 RTV、`Present(1)`、
+    帧率 OSD、捕获亲和性。
+- `LutEngine` 变为渲染协调层：设备/线程/自愈/统计，不再直接改纹理内容；
+  `FilterEngine` 变为后端策略层：LUT / 放大镜 / 伽马任何时刻只有一个在屏幕上生效。
+- 新增 `docs/渲染分层与扩展指南.md`：三层边界、线程模型、后端互斥、新增参数/效果的
+  固定步骤、历史护栏与排查方法。
+- 参数表通过 `init/sync` 的 `params` 数组下发给网页，`webui2/app.js` 的
+  `adoptParamDefs()` 据此生成滑块/范围/默认值/分组；新增基础参数不再需要改网页范围表。
+- 预设应用时网页同步重置 HSL/高级项，和宿主「完整 FilterSettings 替换」语义一致，
+  避免宿主 `sync` 到达前出现一次中间态跳变。
+- `build.ps1` / `build-release.ps1` 增加 `D:\tools\llvm-mingw\...` 工具链候选；
+  PowerShell 脚本加 UTF-8 BOM，避免中文注释在 Windows PowerShell 下被按 ANSI 解码
+  导致解析失败。
+
+### 验证
+
+- `--selftest`：JSON 往返（含 `DarkSceneBoost`）、参数元数据（12 项）、暗场景
+  `Equals`、范围夹取、HLSL 编译、D3D11 设备、显示器枚举、5×5 矩阵全部通过。
+- `--enginetest=3`：LUT 启动/呈现正常，实测 180 帧/秒，暗场景权重日志正常。
+- `--enginetest-cycle`：覆盖层隐藏 3 秒后恢复、期间强制重绘，未阻塞 `Present`，退出码 0。
+- `build-release.ps1`：`dist\HScreenFilter-v2.3.0\` + zip 构建通过（WebView2 版）。
+
 ## v2.2.0 (2026-10-24)
 - **修复开机自启后 UI 全白、WebView2 内容不显示（已复现并验证）**
   - 根因：`--autostart` + 「自启后自动进入托盘」时主窗口从未 `ShowWindow` 过，而

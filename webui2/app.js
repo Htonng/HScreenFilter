@@ -29,6 +29,12 @@ const BASE_LABELS = {
   darkScene: '暗场景优化 Dark Scene（暗部提亮·保色相）',
 };
 const ADVANCED_LABELS = { sharpen: '锐化 Sharpen', noiseReduction: '降噪 Noise Reduction', edgeEnhancement: '边缘增强 Edge Enhancement', clarity: '清晰度 Clarity', qualityEnhancement: '画质增强 Quality Enhancement' };
+// 参数默认值的本地兜底（独立打开 index.html、尚未收到宿主 init 时使用）。
+const NEUTRAL_BASE = {
+  brightness: 0, contrast: 100, saturation: 100, highlights: 0, shadows: 0,
+  temperature: 0, darkScene: 0, sharpen: 0, noiseReduction: 0,
+  edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0,
+};
 const CHANNELS = [
   { name: '全部（主）', color: '#8899AA', hue: 210, master: true },
   { name: '红',   color: '#FF0000', hue: 0 },
@@ -65,6 +71,8 @@ const state = {
   dirty: false, theme: 'auto',
   capturing: null,        // {scope, profile}
   perAppStatus: '○ 按应用切换未启用',
+  paramsSig: '',          // 宿主下发的参数表签名（变化时才重建滑块）
+  paramDefaults: {},      // 宿主下发的每个基础参数默认值
 };
 
 /* ── 消息桥 ── */
@@ -153,7 +161,38 @@ function defaultState() {
   };
 }
 
+/* 宿主下发的参数表是唯一事实来源：范围/默认值/分组/标签都在 C++ models.cpp 定义。
+ * 旧实现网页与宿主各自维护一份范围表，扩大范围时只改了一边就会「界面能拖、
+ * 宿主静默截断」或「宿主接受了、网页又按旧范围显示」。 */
+function adoptParamDefs(defs) {
+  if (!Array.isArray(defs) || !defs.length) return false;
+  const sig = JSON.stringify(defs);
+  if (sig === state.paramsSig) return false;
+  state.paramsSig = sig;
+  const baseKeys = [], advKeys = [];
+  defs.forEach(d => {
+    if (!d || typeof d.key !== 'string') return;
+    const min = (typeof d.min === 'number') ? d.min : 0;
+    const max = (typeof d.max === 'number') ? d.max : 100;
+    const def = (typeof d.default === 'number') ? d.default : 0;
+    RANGES.base[d.key] = [min, max];
+    state.paramDefaults[d.key] = def;
+    if (!(d.key in state.settings.base)) state.settings.base[d.key] = def;
+    if (d.advanced) {
+      if (!ADVANCED_LABELS[d.key] && d.label) ADVANCED_LABELS[d.key] = d.label;
+      advKeys.push(d.key);
+    } else {
+      if (d.label) BASE_LABELS[d.key] = d.label;
+      baseKeys.push(d.key);
+    }
+  });
+  if (baseKeys.length) { BASE_KEYS.length = 0; BASE_KEYS.push(...baseKeys); }
+  if (advKeys.length) { ADVANCED_KEYS.length = 0; ADVANCED_KEYS.push(...advKeys); }
+  return true;
+}
+
 function applyState(p) {
+  const schemaChanged = adoptParamDefs(p.params);
   if (p.settings && p.settings.base) state.settings.base = Object.assign(state.settings.base, p.settings.base);
   if (p.settings && p.settings.hsl) {
     if (p.settings.hsl.master) state.settings.hsl.master = p.settings.hsl.master;
@@ -188,8 +227,13 @@ function applyState(p) {
   renderProfiles();
   renderBindings();
   applyControls();
-  refreshBaseSliders();
-  refreshAdvancedSliders();
+  if (schemaChanged) {
+    buildBaseSliders();
+    buildAdvancedSliders();
+  } else {
+    refreshBaseSliders();
+    refreshAdvancedSliders();
+  }
   buildHslSliders();
   updateEngineStatus();
   updateHslEnabled();
@@ -255,7 +299,7 @@ function buildBaseSliders() {
   const group = $('#baseSliders');
   group.innerHTML = '';
   BASE_KEYS.forEach(key => {
-    const [min, max] = RANGES.base[key];
+    const [min, max] = RANGES.base[key] || [0, 100];
     const row = document.createElement('div');
     row.className = 'slider-row';
     row.dataset.key = key;
@@ -295,7 +339,7 @@ function buildBaseSliders() {
 function refreshBaseSliders() {
   $$('#baseSliders .flat-range').forEach(input => {
     const key = input.dataset.key;
-    const [min, max] = RANGES.base[key];
+    const [min, max] = RANGES.base[key] || [0, 100];
     input.value = state.settings.base[key];
     const num = input.closest('.slider-row').querySelector('.num');
     num.value = state.settings.base[key];
@@ -308,6 +352,7 @@ function buildAdvancedSliders() {
   const group = $('#advancedSliders');
   group.innerHTML = '';
   ADVANCED_KEYS.forEach(key => {
+    const [min, max] = RANGES.base[key] || [0, 100];
     const row = document.createElement('div');
     row.className = 'slider-row';
     row.dataset.key = key;
@@ -320,34 +365,35 @@ function buildAdvancedSliders() {
     label.append(span, num);
     const input = document.createElement('input');
     input.type = 'range'; input.className = 'flat-range';
-    input.min = 0; input.max = 100;
+    input.min = min; input.max = max;
     input.dataset.key = key;
     const value = state.settings.base[key] || 0;
     input.value = value; num.value = value;
     const update = v => {
       state.settings.base[key] = v; input.value = v; num.value = v;
-      paintFill(input, 0, 100, v, '');
+      paintFill(input, min, max, v, '');
       markDirty();
       send({ type: 'base', key, value: v });
     };
     input.addEventListener('input', () => update(+input.value));
     num.addEventListener('change', () => {
       let v = +num.value; if (isNaN(v)) v = +input.value;
-      update(Math.max(0, Math.min(100, v)));
+      update(Math.max(min, Math.min(max, v)));
     });
     row.append(label, input);
-    paintFill(input, 0, 100, value, '');
+    paintFill(input, min, max, value, '');
     group.appendChild(row);
   });
 }
 function refreshAdvancedSliders() {
   $$('#advancedSliders .flat-range').forEach(input => {
     const key = input.dataset.key;
+    const [min, max] = RANGES.base[key] || [0, 100];
     const value = state.settings.base[key] || 0;
     input.value = value;
     const num = input.closest('.slider-row').querySelector('.num');
     num.value = value;
-    paintFill(input, 0, 100, value, '');
+    paintFill(input, min, max, value, '');
   });
   // 以「LUT 引擎真的在跑」为准（开关打开但引擎回退到放大镜/伽马时仍应禁用）
   const enabled = !!state.lutActive;
@@ -773,7 +819,19 @@ function wireStaticControls() {
   const applyPreset = (name) => {
     const p = PRESETS[name];
     if (!p) return;
-    state.settings.base = Object.assign(state.settings.base, p);
+    // 宿主 ApplyPresetByName 会以一份完整 FilterSettings 替换当前设置（含 HSL/高级项）。
+    // 网页本地也按同一语义重置，否则在宿主 sync 到达前会短暂显示另一套数值，看起来
+    // 像「点一个预设，画面先跳到旧 HSL 再跳回来」。
+    const zero = Object.assign({}, NEUTRAL_BASE);
+    BASE_KEYS.concat(ADVANCED_KEYS).forEach(k => {
+      if (typeof state.paramDefaults[k] === 'number') zero[k] = state.paramDefaults[k];
+    });
+    state.settings.base = Object.assign(zero, p);
+    state.settings.hsl = {
+      master: { h: 0, s: 100, l: 0 },
+      channels: CHANNELS.slice(1).map(c => ({ name: c.name, h: 0, s: 100, l: 0 })),
+    };
+    buildHslSliders();
     refreshBaseSliders();
     refreshAdvancedSliders();
     markDirty();

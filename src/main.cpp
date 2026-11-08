@@ -131,6 +131,7 @@ static int RunSelfTest()
         data.Current.EdgeEnhancement = 34;
         data.Current.Clarity = 45;
         data.Current.QualityEnhancement = 56;
+        data.Current.DarkSceneBoost = 73;   // 暗场景优化必须能进 profiles.json
         data.Current.HslSaturation = 150;
         data.Current.FindChannel(HslChannelNames::Red)->Hue = 30;
         Profile p;
@@ -169,6 +170,7 @@ static int RunSelfTest()
                       back.Current.EdgeEnhancement == 34 &&
                       back.Current.Clarity == 45 &&
                       back.Current.QualityEnhancement == 56 &&
+                      back.Current.DarkSceneBoost == 73 &&
                       back.Current.HslSaturation == 150 &&
                       back.Current.FindChannel(HslChannelNames::Red) &&
                       back.Current.FindChannel(HslChannelNames::Red)->Hue == 30 &&
@@ -193,6 +195,40 @@ static int RunSelfTest()
                 out(L"[FAIL] 旧配置缺少锐化字段时未使用默认值 0");
                 fails++;
             }
+        }
+    }
+
+    // 1b) 参数元数据 / 暗场景脏检测 / 范围夹取
+    {
+        const auto& all = FilterParams::All();
+        bool ok = all.size() == 12;
+        const FilterParams::Def* dark = FilterParams::Find(L"darkScene");
+        ok = ok && dark && dark->Min == 0 && dark->Max == 100;
+        ok = ok && dark && std::wstring(dark->JsonKey) == L"DarkSceneBoost";
+        FilterSettings a, b;
+        ok = ok && a.Equals(b);
+        a.DarkSceneBoost = 50;
+        ok = ok && !a.Equals(b);
+        b = a;
+        ok = ok && a.Equals(b);
+        b.DarkSceneBoost = 51;
+        ok = ok && !a.Equals(b);
+
+        // 越界值必须被模型层夹取：旧实现只在网页 clamp，宿主/导入 JSON 可绕过。
+        FilterSettings clamped;
+        if (dark) FilterParams::Set(clamped, *dark, 999);
+        ok = ok && clamped.DarkSceneBoost == 100;
+        JsonValue j = clamped.ToJson();
+        ok = ok && j.GetNumber(L"DarkSceneBoost", -1) == 100;
+
+        if (!ok)
+        {
+            out(L"[FAIL] 参数元数据 / 暗场景持久化 / 范围夹取");
+            fails++;
+        }
+        else
+        {
+            out(L"[ OK ] 参数元数据（12 项）、暗场景 Equals/JSON、范围夹取");
         }
     }
 

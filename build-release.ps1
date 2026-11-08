@@ -1,4 +1,4 @@
-# build-release.ps1 — 构建发布版 HScreenFilter（WebView2 桥接版，链接真实数据层 + 滤镜引擎）
+﻿# build-release.ps1 — 构建发布版 HScreenFilter（WebView2 桥接版，链接真实数据层 + 滤镜引擎）
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -7,6 +7,7 @@ if (-not $tc -or -not (Test-Path $tc)) {
     $candidates = @(
         "$root\tools\llvm-mingw-beta\llvm-mingw-20260616-ucrt-x86_64",
         "F:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
+        "D:\tools\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "$env:LOCALAPPDATA\llvm-mingw\llvm-mingw-20260616-ucrt-x86_64",
         "C:\llvm-mingw"
     )
@@ -16,7 +17,7 @@ if (-not $tc -or -not (Test-Path "$tc\bin\clang++.exe")) { throw "llvm-mingw too
 
 $clang = "$tc\bin\clang++.exe"
 $windres = "$tc\bin\windres.exe"
-$out = Join-Path $root 'dist\HScreenFilter-v2.2.0'
+$out = Join-Path $root 'dist\HScreenFilter-v2.3.1'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $srcs = @(
@@ -24,7 +25,10 @@ $srcs = @(
     "src\common.cpp", "src\log.cpp", "src\json.cpp", "src\models.cpp",
     "src\store.cpp", "src\monitors.cpp", "src\autostart.cpp",
     "src\msgwindow.cpp", "src\hotkeys.cpp", "src\fgwatcher.cpp",
-    "src\engines\hlsl.cpp", "src\engines\lut_engine.cpp", "src\engines\mag_engine.cpp",
+    "src\engines\hlsl.cpp",
+    "src\engines\render\desktop_capture.cpp", "src\engines\render\color_processor.cpp",
+    "src\engines\render\overlay_presenter.cpp",
+    "src\engines\lut_engine.cpp", "src\engines\mag_engine.cpp",
     "src\engines\gamma_engine.cpp", "src\engines\filter_engine.cpp"
 ) | ForEach-Object { Join-Path $root $_ }
 
@@ -50,8 +54,7 @@ function Invoke-Native {
         [string]$LogPath
     )
     $errPath = "$LogPath.err"
-    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -WindowStyle Hidden -PassThru -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
     if (Test-Path $LogPath) { Get-Content -LiteralPath $LogPath -Raw | Write-Host }
     if (Test-Path $errPath) { Get-Content -LiteralPath $errPath -Raw | Write-Host }
     Remove-Item -LiteralPath $LogPath, $errPath -Force -ErrorAction SilentlyContinue
@@ -79,7 +82,7 @@ Copy-Item "$root\webui2" $dstWeb -Recurse -Force
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match 'webview2_demo2|\.log$|preview\.png$' } | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # 打包发布 zip
-$zip = Join-Path $root 'dist\HScreenFilter-v2.2.0.zip'
+$zip = Join-Path $root 'dist\HScreenFilter-v2.3.1.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
 
@@ -87,4 +90,4 @@ Write-Host ""
 Write-Host "Build OK: $out\HScreenFilter.exe"
 Write-Host "Run:      $out\HScreenFilter.exe"
 Write-Host "Package:  $zip"
-Write-Host "Version:  v2.2.0"
+Write-Host "Version:  v2.3.1"

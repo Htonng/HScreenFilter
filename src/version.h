@@ -2,8 +2,8 @@
 #ifndef HSF_VERSION_H
 #define HSF_VERSION_H
 
-#define HSF_VERSION_STR  "v2.2.0"
-#define HSF_VERSION_WSTR L"v2.2.0"
-#define HSF_VERSION_NUM  2,2,0,0
+#define HSF_VERSION_STR  "v2.3.1"
+#define HSF_VERSION_WSTR L"v2.3.1"
+#define HSF_VERSION_NUM  2,3,1,0
 
 #endif // HSF_VERSION_H
