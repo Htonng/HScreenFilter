@@ -36,15 +36,15 @@ const NEUTRAL_BASE = {
   edgeEnhancement: 0, clarity: 0, qualityEnhancement: 0,
 };
 const CHANNELS = [
-  { name: '全部（主）', color: '#8899AA', hue: 210, master: true },
-  { name: '红',   color: '#FF0000', hue: 0 },
-  { name: '橙',   color: '#FF8000', hue: 30 },
-  { name: '黄',   color: '#FFD400', hue: 52 },
-  { name: '绿',   color: '#22C55E', hue: 140 },
-  { name: '青',   color: '#06B6D4', hue: 188 },
-  { name: '蓝',   color: '#3B82F6', hue: 218 },
-  { name: '紫',   color: '#8B5CF6', hue: 262 },
-  { name: '品红', color: '#EC4899', hue: 330 },
+  { name: '全部（主）', color: 'hsl(0,0%,55%)',   hue: 210, master: true },
+  { name: '红',   color: 'hsl(2,78%,52%)',   hue: 0 },
+  { name: '橙',   color: 'hsl(28,90%,52%)',  hue: 30 },
+  { name: '黄',   color: 'hsl(50,92%,50%)',  hue: 52 },
+  { name: '绿',   color: 'hsl(140,60%,42%)', hue: 140 },
+  { name: '青',   color: 'hsl(188,80%,42%)', hue: 188 },
+  { name: '蓝',   color: 'hsl(216,80%,56%)', hue: 218 },
+  { name: '紫',   color: 'hsl(264,62%,58%)', hue: 262 },
+  { name: '品红', color: 'hsl(328,72%,56%)', hue: 330 },
 ];
 const FIELD_KEYS = ['h', 's', 'l'];
 const FIELD_NAMES = ['色相', '饱和度', '明亮度'];
@@ -59,6 +59,7 @@ const state = {
   hslChannel: 0,
   displays: [], displayIndex: 0,
   master: false, lut: false, vsync: false, perapp: false,
+  hotkeyCompat: false,    // 按键兼容模式：热键不独占，游戏仍能收到同一按键
   vsyncForced: true,      // 滤镜层强制垂直同步（宿主下发；界面开关显示为开且锁住）
   lutActive: false,
   hdrColor: false,        // 显示器是否处于 HDR（仅用于解释「为什么 LUT 被锁成开」）
@@ -131,6 +132,10 @@ function handleHost(msg) {
     case 'status':
       if (msg.id === 'perapp') { state.perAppStatus = msg.text || ''; $('#perAppStatus').textContent = state.perAppStatus; }
       if (msg.id === 'hint') $('#hotkeyHint').textContent = msg.text || '';
+      if (msg.id === 'hotkeyCompat') {
+        const hint = $('#hotkeyCompatHint');
+        if (hint) hint.textContent = msg.text || '';
+      }
       break;
     case 'capturing':
       state.capturing = { scope: msg.scope, profile: msg.profile };
@@ -150,6 +155,7 @@ function defaultState() {
     displays: [{ index: 0, label: '主显示器（1920 × 1080）', enabled: false }],
     displayIndex: 0,
     master: false, lut: true, vsync: false, perapp: false,
+    hotkeyCompat: false,
     showFps: false,
     autostart: false, autotray: true, globalHotkey: '',
     engine: '滤镜引擎：LUT 逐像素引擎',
@@ -208,6 +214,7 @@ function applyState(p) {
   if (typeof p.vsyncForced === 'boolean') state.vsyncForced = p.vsyncForced;
   state.hdrColor = !!p.hdr;   // 显示器是否处于 HDR（只影响是否强制 LUT 引擎）
   state.perapp = !!p.perapp;
+  if (typeof p.hotkeyCompat === 'boolean') state.hotkeyCompat = p.hotkeyCompat;
   state.autostart = !!p.autostart; state.autotray = !!p.autotray;
   state.globalHotkey = p.globalHotkey || '';
   state.engineText = p.engine || state.engineText;
@@ -270,11 +277,15 @@ function applyControls() {
               + 'HDR 显示器上由 Windows 按「SDR 内容亮度」把覆盖层映射到 HDR 信号。';
   badge.classList.toggle('hdr-on', state.hdrColor);
   $('#perAppSwitch').checked = state.perapp;
+  const hc = $('#hotkeyCompatSwitch');
+  if (hc) hc.checked = !!state.hotkeyCompat;
   $('#autoStartSwitch').checked = state.autostart;
   $('#autoTraySwitch').checked = state.autotray;
   $('#fpsSwitch').checked = state.showFps;
   updateFpsBadge();
   $('#globalHotkeyBadge').textContent = state.globalHotkey || '未设置';
+  const hk2 = $('#globalHotkeyBadge2');
+  if (hk2) hk2.textContent = state.globalHotkey || '未设置';
   const selP = state.selectedProfile >= 0 ? state.profiles[state.selectedProfile] : null;
   $('#profileHotkeyBadge').textContent = selP && selP.hotkey ? selP.hotkey : '—';
 }
@@ -285,13 +296,49 @@ const RAINBOW = 'linear-gradient(to right,' +
 function hueBandGradient(hue) { return 'linear-gradient(to right, hsl(' + (hue - 30) + ',100%,50%), hsl(' + (hue + 30) + ',100%,50%))'; }
 function satGradient(hue) { return 'linear-gradient(to right, hsl(' + hue + ',10%,62%), hsl(' + hue + ',100%,55%))'; }
 function lightGradient(hue) { return 'linear-gradient(to right, #000000, hsl(' + hue + ',100%,50%), #FFFFFF)'; }
+/* 轨道样式全部交给 CSS：这里只写入 --rng（轨道背景）和 --t（默认值刻度位置）。
+ * 滑块宽度必须与 styles.css 的 ::-webkit-slider-thumb 宽度一致，填充边界才会对准滑块中心。 */
+const THUMB_W = 20;
+const atFrac = f => 'calc(' + (THUMB_W / 2) + 'px + ' + f.toFixed(4) + ' * (100% - ' + THUMB_W + 'px))';
 function paintFill(input, min, max, value, gradient) {
-  const pct = (value - min) / (max - min) * 100;
-  if (gradient && gradient.startsWith('linear-gradient')) { input.style.background = gradient; return; }
-  const css = getComputedStyle(document.body);
-  const accent = css.getPropertyValue('--accent').trim() || '#3B82F6';
-  const border = css.getPropertyValue('--border').trim() || '#E1E7EF';
-  input.style.background = 'linear-gradient(to right,' + accent + ' 0%,' + accent + ' ' + pct + '%,' + border + ' ' + pct + '%,' + border + ' 100%)';
+  const span = (max - min) || 1;
+  const frac = v => Math.max(0, Math.min(1, (v - min) / span));
+  const def = (input.dataset.def !== undefined) ? +input.dataset.def : min;
+  const wrap = input.parentElement;
+  if (wrap && wrap.classList.contains('rng')) wrap.style.setProperty('--t', frac(def).toFixed(4));
+  if (gradient && gradient.startsWith('linear-gradient')) { input.style.setProperty('--rng', gradient); return; }
+  const a = atFrac(Math.min(frac(def), frac(value)));
+  const b = atFrac(Math.max(frac(def), frac(value)));
+  input.style.setProperty('--rng', 'linear-gradient(to right,var(--track) 0,var(--track) ' + a +
+    ',var(--accent) ' + a + ',var(--accent) ' + b + ',var(--track) ' + b + ',var(--track) 100%)');
+}
+function paintGrad(input, gradient) { paintFill(input, +input.min, +input.max, +input.value, gradient); }
+function wrapRange(input) {
+  const w = document.createElement('div');
+  w.className = 'rng';
+  w.appendChild(input);
+  return w;
+}
+function baseDefault(key) {
+  if (typeof state.paramDefaults[key] === 'number') return state.paramDefaults[key];
+  return (key in NEUTRAL_BASE) ? NEUTRAL_BASE[key] : 0;
+}
+/* 「亮度 Brightness」→ 中文为主，英文和括号说明弱化显示 */
+function setSliderLabel(span, text) {
+  text = String(text || '');
+  let note = '';
+  const pm = text.match(/\s*([（(][^）)]*[）)])\s*$/);
+  if (pm) { note = pm[1]; text = text.slice(0, pm.index); }
+  let zh = text, en = '';
+  const em = text.match(/^(.*?)\s+([A-Za-z][A-Za-z ]*)$/);
+  if (em) { zh = em[1]; en = em[2]; }
+  span.textContent = zh;
+  [[en, 'en'], [note, 'note']].forEach(([t, cls]) => {
+    if (!t) return;
+    const s = document.createElement('small');
+    s.className = cls; s.textContent = t;
+    span.appendChild(s);
+  });
 }
 
 /* ── 基础滑块 ── */
@@ -306,7 +353,7 @@ function buildBaseSliders() {
     const label = document.createElement('div');
     label.className = 'slider-label';
     const span = document.createElement('span');
-    span.textContent = BASE_LABELS[key];
+    setSliderLabel(span, BASE_LABELS[key]);
     const num = document.createElement('input');
     num.type = 'number'; num.className = 'num'; num.value = state.settings.base[key];
     label.append(span, num);
@@ -314,6 +361,7 @@ function buildBaseSliders() {
     input.type = 'range'; input.className = 'flat-range';
     input.min = min; input.max = max; input.value = state.settings.base[key];
     input.dataset.key = key;
+    input.dataset.def = baseDefault(key);
     input.dataset.gradient = (key === 'temperature') ? 'linear-gradient(to right,#4A90D9,#FFFFFF 50%,#E8862C)' : '';
     input.addEventListener('input', () => {
       state.settings.base[key] = +input.value;
@@ -331,7 +379,7 @@ function buildBaseSliders() {
       markDirty();
       send({ type: 'base', key, value: v });
     });
-    row.append(label, input);
+    row.append(label, wrapRange(input));
     paintFill(input, min, max, +input.value, input.dataset.gradient || '');
     group.appendChild(row);
   });
@@ -359,7 +407,7 @@ function buildAdvancedSliders() {
     const label = document.createElement('div');
     label.className = 'slider-label';
     const span = document.createElement('span');
-    span.textContent = ADVANCED_LABELS[key];
+    setSliderLabel(span, ADVANCED_LABELS[key]);
     const num = document.createElement('input');
     num.type = 'number'; num.className = 'num';
     label.append(span, num);
@@ -367,6 +415,7 @@ function buildAdvancedSliders() {
     input.type = 'range'; input.className = 'flat-range';
     input.min = min; input.max = max;
     input.dataset.key = key;
+    input.dataset.def = baseDefault(key);
     const value = state.settings.base[key] || 0;
     input.value = value; num.value = value;
     const update = v => {
@@ -380,7 +429,7 @@ function buildAdvancedSliders() {
       let v = +num.value; if (isNaN(v)) v = +input.value;
       update(Math.max(min, Math.min(max, v)));
     });
-    row.append(label, input);
+    row.append(label, wrapRange(input));
     paintFill(input, min, max, value, '');
     group.appendChild(row);
   });
@@ -487,7 +536,7 @@ function buildHslSliders() {
     const label = document.createElement('div');
     label.className = 'slider-label';
     const span = document.createElement('span');
-    span.innerHTML = '<i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + CHANNELS[c].color + ';margin-right:6px"></i>' + CHANNELS[c].name;
+    span.innerHTML = '<i class="swatch" style="--c:' + CHANNELS[c].color + '"></i>' + CHANNELS[c].name;
     const num = document.createElement('input');
     num.type = 'number'; num.className = 'num'; num.value = fmtHsl(val, field);
     label.append(span, num);
@@ -495,9 +544,10 @@ function buildHslSliders() {
     input.type = 'range'; input.className = 'flat-range';
     input.min = min; input.max = max; input.value = val;
     input.dataset.channel = c; input.dataset.field = field;
+    input.dataset.def = (field === 1) ? RANGES.hsl.satBase : 0;
     input.addEventListener('input', () => {
       setHslVal(c, field, +input.value);
-      input.style.background = hslGradient(c, field);
+      paintGrad(input, hslGradient(c, field));
       num.value = fmtHsl(+input.value, field);
       markDirty();
       send({ type: 'hsl', channel: c, field: FIELD_KEYS[field], value: +input.value });
@@ -507,13 +557,13 @@ function buildHslSliders() {
       if (v === null) v = +input.value;
       v = Math.max(min, Math.min(max, v));
       setHslVal(c, field, v);
-      input.value = v; input.style.background = hslGradient(c, field);
+      input.value = v; paintGrad(input, hslGradient(c, field));
       num.value = fmtHsl(v, field);
       markDirty();
       send({ type: 'hsl', channel: c, field: FIELD_KEYS[field], value: v });
     });
-    row.append(label, input);
-    input.style.background = hslGradient(c, field);
+    row.append(label, wrapRange(input));
+    paintGrad(input, hslGradient(c, field));
     list.appendChild(row);
   }
   applyHslChipFocus();
@@ -532,6 +582,7 @@ function renderDisplays() {
   sel.selectedIndex = state.displayIndex;
 }
 function renderProfiles() {
+  renderProfileSelect();
   const wrap = $('#profileRows');
   wrap.innerHTML = '';
   if (!state.profiles.length) { $('#profileEmpty').hidden = false; return; }
@@ -542,11 +593,11 @@ function renderProfiles() {
     const row = document.createElement('div');
     row.className = 'table-row' + (sel ? ' selected' : '');
     row.dataset.profile = i;
-    const engine = p.engine === 'LUT' ? '<span class="tag tag-blue">LUT</span>' : '<span class="tag">放大镜</span>';
+    const engine = p.engine === 'LUT' ? '<span class="tag tag-strong">LUT</span>' : '<span class="tag">放大镜</span>';
     row.innerHTML =
       '<span class="col-name"><i class="radio-dot' + (on ? ' on' : '') + '"></i><span class="pname"></span></span>' +
       '<span class="col-engine">' + engine + '</span>' +
-      '<span class="col-hotkey"><span class="hotkey-key">' + (p.hotkey || '—') + '</span></span>' +
+      '<span class="col-hotkey">' + (p.hotkey ? '<span class="hotkey-key">' + esc(p.hotkey) + '</span>' : '<span class="hotkey-none">—</span>') + '</span>' +
       '<span class="col-check"><button class="btn btn-enable' + (on ? ' active' : '') + '" data-profile="' + i + '">' + (on ? '已启用' : '启用') + '</button></span>';
     row.querySelector('.pname').textContent = p.name;
     row.addEventListener('click', () => { state.selectedProfile = i; renderProfiles(); });
@@ -554,22 +605,50 @@ function renderProfiles() {
   });
   $$('#profileRows .btn-enable').forEach(b => b.addEventListener('click', ev => {
     ev.stopPropagation();
-    const i = +b.dataset.profile;
-    const activate = () => {
-      state.activeProfile = i;
-      state.selectedProfile = i;
-      renderProfiles();
-      send({ type: 'profile-activate', index: i });
-    };
-    const prof = state.profiles[i];
-    // 启用 LUT 配置同样会启动逐像素引擎：和手动拨 LUT 开关一样先提示性能损耗
-    if (prof && prof.engine === 'LUT' && !state.lut) {
-      confirmLutEnable(activate, '配置「' + prof.name + '」使用 LUT 引擎');
-      return;
-    }
-    activate();
+    activateProfile(+b.dataset.profile);
   }));
   applyControls();
+}
+/* 启用某个配置。返回 true 表示已立即生效；false 表示正在等待 LUT 性能确认。 */
+function activateProfile(i) {
+  const activate = () => {
+    state.activeProfile = i;
+    state.selectedProfile = i;
+    renderProfiles();
+    send({ type: 'profile-activate', index: i });
+  };
+  const prof = state.profiles[i];
+  // 启用 LUT 配置同样会启动逐像素引擎：和手动拨 LUT 开关一样先提示性能损耗
+  if (prof && prof.engine === 'LUT' && !state.lut) {
+    confirmLutEnable(activate, '配置「' + prof.name + '」使用 LUT 引擎');
+    return false;
+  }
+  activate();
+  return true;
+}
+/* 顶部工具栏的配置下拉：任何页面都能切换当前配置 */
+function renderProfileSelect() {
+  const sel = $('#profileSelect');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!state.profiles.length) {
+    const o = document.createElement('option');
+    o.value = '-1'; o.textContent = '暂无配置';
+    sel.appendChild(o); sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  if (state.activeProfile < 0 || state.activeProfile >= state.profiles.length) {
+    const o = document.createElement('option');
+    o.value = '-1'; o.textContent = '当前设置';
+    sel.appendChild(o);
+  }
+  state.profiles.forEach((p, i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  sel.value = (state.activeProfile >= 0 && state.activeProfile < state.profiles.length) ? String(state.activeProfile) : '-1';
 }
 function renderBindings() {
   const wrap = $('#bindingRows');
@@ -582,7 +661,7 @@ function renderBindings() {
     row.className = 'table-row' + (sel ? ' selected' : '');
     row.dataset.binding = i;
     row.innerHTML = '<span class="col-app"><i class="proc-ico"></i><span class="bname"></span></span>' +
-                    '<span class="col-cfg"><span class="tag tag-green">' + esc(b.target) + '</span></span>';
+                    '<span class="col-cfg"><span class="tag">' + esc(b.target) + '</span></span>';
     row.querySelector('.bname').textContent = b.name;
     row.addEventListener('click', () => { state.selectedBinding = i; renderBindings(); });
     wrap.appendChild(row);
@@ -676,6 +755,7 @@ function updateEngineStatus() {
   const base = state.engineText || '滤镜引擎';
   const txt = $('#engineText') || el.lastChild;
   if (txt) txt.textContent = on ? base : '滤镜引擎：已关闭';
+  el.title = txt ? txt.textContent : '';   // 650 宽下被省略时仍可悬停看完整状态
 }
 /* 实时帧率（标题栏右上角）：开关关闭时隐藏；fps < 0 = 当前没有在跑的 LUT 引擎 */
 function updateFpsBadge() {
@@ -726,7 +806,7 @@ function applyTheme() {
   // 把实际生效的主题告诉宿主：窗口标题栏要跟着 UI 主题走（标题栏与界面一体）
   send({ type: 'theme', dark: eff === 'dark' });
   $$('#baseSliders .flat-range').forEach(input => paintFill(input, +input.min, +input.max, +input.value, input.dataset.gradient || ''));
-  $$('#hslSliders .flat-range').forEach(input => { input.style.background = hslGradient(+input.dataset.channel, +input.dataset.field); });
+  $$('#hslSliders .flat-range').forEach(input => paintGrad(input, hslGradient(+input.dataset.channel, +input.dataset.field)));
 }
 
 /* ── 静态控件绑定 ── */
@@ -734,17 +814,24 @@ function wireStaticControls() {
   $$('.nav-item').forEach(b => b.addEventListener('click', () => {
     $$('.nav-item').forEach(x => x.classList.toggle('active', x === b));
     $$('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + b.dataset.page));
+    const content = $('.content');
+    if (content) content.scrollTop = 0;   // 页面共用一个滚动容器，切页时回到顶部
   }));
 
   const SWITCH_IDS = {
     masterEnable: 'master', lutSwitch: 'lut', vsyncSwitch: 'vsync',
     perAppSwitch: 'perapp',
     autoStartSwitch: 'autostart', autoTraySwitch: 'autotray', displayEnable: 'display',
-    fpsSwitch: 'showfps',
+    fpsSwitch: 'showfps', hotkeyCompatSwitch: 'hotkeycompat',
   };
   const doSwitch = (id, el, v) => {
     if (id === 'displayEnable') { state.displays[state.displayIndex].enabled = v; $('#displayEnableText').textContent = v ? '启用（已开）' : '启用（已关）'; }
     else state[keyOf(id)] = v;
+    // 按键兼容模式是全局偏好（宿主立即落盘），不参与“配置未保存修改”。
+    if (id === 'hotkeyCompatSwitch') {
+      send({ type: 'switch', id: 'hotkeycompat', value: v });
+      return;
+    }
     if (id === 'lutSwitch') { state.lutActive = v; refreshAdvancedSliders(); updateHslEnabled(); }
     if (id === 'perAppSwitch') updatePerAppEnabled();
     if (id === 'masterEnable') updateEngineStatus();
@@ -755,7 +842,8 @@ function wireStaticControls() {
   };
   const keyOf = id => ({ masterEnable: 'master', lutSwitch: 'lut', vsyncSwitch: 'vsync',
     perAppSwitch: 'perapp', autoStartSwitch: 'autostart', autoTraySwitch: 'autotray',
-    displayEnable: 'displayEnabled', fpsSwitch: 'showFps' }[id] || id);
+    displayEnable: 'displayEnabled', fpsSwitch: 'showFps',
+    hotkeyCompatSwitch: 'hotkeyCompat' }[id] || id);
   // 绕过「再次确认」，直接启用 LUT（用于 LUT 预设确认之后）。
   const enableLutNow = () => {
     if (state.lut) return;
@@ -787,10 +875,17 @@ function wireStaticControls() {
   wire('autoStartSwitch'); wire('autoTraySwitch');
   wire('displayEnable');
   wire('fpsSwitch');
+  wire('hotkeyCompatSwitch');
 
   $('#displaySelect').addEventListener('change', () => {
     state.displayIndex = +$('#displaySelect').value;
     send({ type: 'display', index: state.displayIndex });
+  });
+  $('#profileSelect').addEventListener('change', e => {
+    const i = +e.target.value;
+    if (i < 0) return;
+    // 等待 LUT 确认时先把下拉还原；确认后 renderProfiles 会把它设成新配置
+    if (!activateProfile(i)) renderProfileSelect();
   });
   $('#themeSelect').addEventListener('change', e => {
     state.theme = e.target.value;
@@ -956,6 +1051,6 @@ function markDirty() { /* 保存弹窗改由宿主判定（对比保存快照）
 function setDirty(on) { state.dirty = on; $('#saveBar').hidden = !on; }
 function flash(btn) {
   if (!btn) return;
-  btn.style.transition = 'none'; btn.style.background = 'var(--accent)'; btn.style.color = '#fff';
-  setTimeout(() => { btn.style.transition = ''; btn.style.background = ''; btn.style.color = ''; }, 160);
+  btn.classList.add('flash');
+  setTimeout(() => btn.classList.remove('flash'), 160);
 }

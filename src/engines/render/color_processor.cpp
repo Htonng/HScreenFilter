@@ -4,16 +4,6 @@
 
 namespace hsf {
 
-namespace {
-double SmoothStep01(double e0, double e1, double x)
-{
-    double t = (x - e0) / (e1 - e0);
-    if (t < 0.0) t = 0.0;
-    if (t > 1.0) t = 1.0;
-    return t * t * (3.0 - 2.0 * t);
-}
-} // namespace
-
 bool ColorProcessor::Initialize(ID3D11Device* device, ID3D11DeviceContext* context,
                                 int width, int height)
 {
@@ -230,7 +220,7 @@ void ColorProcessor::DispatchLut()
         memcpy(paramsCopy_, params_, sizeof(params_));
     }
     // 槽 42 是场景自适应权重，不属于界面下发参数；单一写入者，无需加锁。
-    paramsCopy_[42] = (float)sceneWeight_;
+    paramsCopy_[42] = (float)sceneWeightState_.appliedWeight;
     context_->UpdateSubresource(paramsBuffer_.Get(), 0, nullptr, paramsCopy_, 0, 0);
 
     // 即使当前是中性也生成一次：保证 3D LUT 纹理永远有确定内容。
@@ -298,38 +288,24 @@ bool ColorProcessor::Draw(ID3D11ShaderResourceView* input, ID3D11RenderTargetVie
 
 bool ColorProcessor::UpdateSceneWeight(double mean, DWORD nowTick, bool startupStable)
 {
-    if (mean < 0.0) return false;
-
-    // 越暗越强，但最低保留 50%：用户明确拖动的滑块不能被 5 块采样静默清零。
-    double weight = kDarkSceneMinWeight +
-                    (1.0 - kDarkSceneMinWeight) * (1.0 - SmoothStep01(0.08, 0.35, mean));
-
     bool sliderOn = false;
     {
         std::lock_guard<std::mutex> lock(paramsMutex_);
         sliderOn = params_[41] > 0.001f;
     }
-    if (!sliderOn)
-    {
-        // 没开暗场景优化时清掉记录：用户一打开滑块，下一拍会立刻按当前场景重建一次。
-        lastSceneWeight_ = -1.0;
-        return false;
-    }
 
-    bool weightMoved = (lastSceneWeight_ < 0.0) || fabs(weight - lastSceneWeight_) > 0.03;
-    if (!weightMoved) return false;
-    // 启动后的前 2.5 秒先不因场景亮度改 LUT：捕获/flip 池/合成器都还在建立。
-    if (!startupStable) return false;
-    if (lastSceneRebuildTick_ != 0 && nowTick - lastSceneRebuildTick_ < 500)
+    // 是否真的改权重由 scene_weight.h 决定：15s 平滑 + 每 2.5s 最多改 0.04。
+    // 旧实现按「原始场景亮度」变化 >0.03 就立刻重建，游戏里 5 块采样每秒在
+    // 0.05~0.34 之间跳，权重 0.5↔1.0 反复翻——观感就是滤镜强度一会强一会弱。
+    double weight = sceneWeightState_.appliedWeight;
+    if (!AdvanceDarkSceneWeight(sceneWeightState_, mean, nowTick, startupStable, sliderOn, weight))
         return false;
 
-    lastSceneRebuildTick_ = nowTick;
-    lastSceneWeight_ = weight;
-    sceneWeight_ = weight;
     paramsDirty_.store(true);
     Log::WriteFmt(L"ColorProcessor",
-                  L"暗场景优化：场景平均亮度=%.2f → 自适应权重=%.2f（越暗越强）",
-                  mean, weight);
+                  L"暗场景优化：场景平均亮度=%.2f（长时平滑 %.2f）→ 自适应权重=%.2f"
+                  L"（限速过渡，避免忽强忽弱）",
+                  mean, sceneWeightState_.smoothedMean, weight);
     return true;
 }
 

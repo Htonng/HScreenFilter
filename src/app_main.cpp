@@ -91,10 +91,12 @@ static int globalHotkeyId_ = 0;
 static std::unique_ptr<ForegroundAppWatcher> watcher_;
 static int activeBinding_ = -1;
 
-static bool capturing_ = false;
+// 快捷键捕获状态：钩子装在消息窗口线程上，回调只做「取 vk/修饰键 + 投递消息」，
+// 绝不在低级钩子里注册热键/通知 WebView2（那会让钩子超过系统超时，游戏里表现为丢键）。
+static std::atomic<bool> capturing_{ false };
 static bool captureGlobal_ = false;
 static int captureProfile_ = -1;
-static HHOOK g_captureHook = nullptr;
+static std::atomic<HHOOK> g_captureHook{ nullptr };
 
 static bool g_trayAdded = false;
 static bool g_exitRequested = false;
@@ -104,6 +106,8 @@ static constexpr UINT_PTR kTimerFps = 4;        // 实时帧率推送（界面�
 static constexpr UINT_PTR kTimerApply = 5;      // WebView2 未就绪时的兜底：延迟启动滤镜
 static constexpr UINT_PTR kTimerWebView = 6;    // WebView2 启动看门狗（白屏自愈）
 static constexpr UINT kMsgShowWindow = WM_APP + 2;   // 第二个实例请求已有实例显示主窗口
+static constexpr UINT kMsgHotkeyCaptured = WM_APP + 10;   // 捕获钩子 → UI 线程：一个按键已捕获
+static constexpr UINT_PTR kTimerCapture = 7;              // 快捷键捕获超时
 
 // 自启进托盘：窗口必须先真正显示过一次再创建 WebView2 控制器 ——
 // WebView2 在「从未显示过」的窗口上初始化时不会建立可见的合成表面，之后从托盘
@@ -685,6 +689,21 @@ static void RegisterGlobalToggle()
         globalHotkeyId_ = id;
 }
 
+// 切换按键兼容模式后必须整体重注册：Register/Unregister 是后端相关的，
+// 只改 HotkeyService 的标志位不会迁移已经用 RegisterHotKey 注册的组合。
+static void ReapplyHotkeys()
+{
+    if (!hotkeys_) return;
+    hotkeys_->SetPreferHook(data_.HotkeyCompat);
+    hotkeys_->UnregisterAll();
+    globalHotkeyId_ = 0;
+    profileHotkeyIds_.clear();
+    for (int i = 0; i < (int)data_.Profiles.size(); i++) RegisterProfileHotkey(i);
+    RegisterGlobalToggle();
+    AppLog(L"[hotkey] 按兼容模式重新注册完成（compat=%d，全局=%d，配置=%d）",
+           data_.HotkeyCompat ? 1 : 0, globalHotkeyId_, (int)profileHotkeyIds_.size());
+}
+
 // 标题栏与 UI 同色、并把系统标题文字设成同色（等于隐藏）→ 观感上标题栏与界面一体。
 // 颜色取网页主题的 --bg / --border：深色 #171B22/#313B4B、浅色 #F3F5F9/#E1E7EF。
 // 网页每次切换/解析主题都会发 {type:'theme', dark} 过来校正（'auto' 由页面解析后上报）。
@@ -700,66 +719,167 @@ static void ApplyTitleBarTheme(bool dark)
     DwmSetWindowAttribute(g_hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof(border));
 }
 
-static void HandleHotkeyCapture(int vk, int scanCode, bool extended)
+static constexpr int kCaptureTimeoutMs = 15000;
+
+static bool IsModifierVk(int vk)
 {
-    if (vk == VK_ESCAPE)
-    {
-        capturing_ = false; captureGlobal_ = false; captureProfile_ = -1;
-        SendStatus(L"hint", L"已取消");
-        return;
-    }
-    if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU ||
-        vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT ||
-        vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN)
-        return;
+    return vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+           vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT ||
+           vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN;
+}
+
+static int CurrentModifiers()
+{
     int mods = 0;
     if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) mods |= MOD_CONTROL;
     if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) mods |= MOD_SHIFT;
     if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) mods |= MOD_ALT;
-    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0) mods |= 0x8;
+    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0)
+        mods |= kModWin;
+    return mods;
+}
+
+// 撤销捕获钩子（幂等）。钩子装在消息窗口线程，所以 UnhookWindowsHookEx 也回到那个线程执行；
+// 同时保证 UI 侧的超时定时器被关掉。
+static void UnhookCaptureHook()
+{
+    HHOOK hook = g_captureHook.exchange(nullptr);
+    if (hook)
+    {
+        if (msgWindow_.Handle() && GetCurrentThreadId() != msgWindow_.ThreadId())
+            msgWindow_.InvokeOnMessageThread([hook] { UnhookWindowsHookEx(hook); }, 1000);
+        else
+            UnhookWindowsHookEx(hook);
+    }
+    if (g_hwnd) KillTimer(g_hwnd, kTimerCapture);
+}
+
+static void HandleHotkeyCapture(int vk, int scanCode, bool extended, int modsOverride = -1)
+{
+    UnhookCaptureHook();   // 正常路径已在钩子里摘掉；取消/超时/直接调用这里兜底
+    if (vk == VK_ESCAPE)
+    {
+        capturing_.store(false); captureGlobal_ = false; captureProfile_ = -1;
+        SendStatus(L"hint", L"已取消");
+        SendState(L"sync");
+        return;
+    }
+    if (IsModifierVk(vk)) return;
+
+    // 修饰键状态必须在钩子回调里取：消息投递到 UI 线程时用户可能已经松开 Ctrl/Alt，
+    // 那会把 Alt+F 捕获成 F。钩子路径通过 modsOverride 把当时的修饰键带过来。
+    int mods = (modsOverride >= 0) ? modsOverride : CurrentModifiers();
+
     // 显示名带扫描码：小键盘 -/. / Enter 与主键区 M/./Enter 共用同一 VK，
     // 不区分就会出现「按小键盘 - 显示 VK6D」这种情况。
     std::wstring display = HotkeyText::FormatEx(mods, vk, scanCode, extended);
     bool wasGlobal = captureGlobal_;
     int wasProfile = captureProfile_;
-    capturing_ = false; captureGlobal_ = false; captureProfile_ = -1;
+    capturing_.store(false); captureGlobal_ = false; captureProfile_ = -1;
     if (wasGlobal)
     {
         data_.GlobalModifiers = mods; data_.GlobalKey = vk; data_.GlobalDisplay = display;
         RegisterGlobalToggle();
-        SendStatus(L"hint", L"全局开关快捷键已设置为 " + display);
+        if (globalHotkeyId_ == 0)
+            SendStatus(L"hint", L"该组合已被其它程序占用/注册失败，请换一个快捷键： " + display);
+        else
+            SendStatus(L"hint", L"全局开关快捷键已设置为 " + display);
     }
     else if (wasProfile >= 0 && wasProfile < (int)data_.Profiles.size())
     {
         auto &p = data_.Profiles[wasProfile];
         p.HotkeyModifiers = mods; p.HotkeyKey = vk; p.HotkeyDisplay = display;
         RegisterProfileHotkey(wasProfile);
-        SendStatus(L"hint", Format(L"已为「%s」设置快捷键 %s", p.Name.c_str(), display.c_str()));
+        if (profileHotkeyIds_.find(wasProfile) == profileHotkeyIds_.end())
+            SendStatus(L"hint", Format(L"快捷键 %s 注册失败（可能被占用或与其它配置重复），请换一个", display.c_str()));
+        else
+            SendStatus(L"hint", Format(L"已为「%s」设置快捷键 %s", p.Name.c_str(), display.c_str()));
     }
     SaveState();
     SendState(L"sync");
 }
 
+// 低级键盘钩子的硬性约束：必须尽快返回（系统超时约 300~500ms）。
+// 旧实现直接在钩子里注册热键、发 WebView2 消息，注册要同步切到消息线程最长等 3s，
+// 游戏里会出现丢键/输入卡顿，也是「和游戏快捷键冲突」的来源之一。
+// 现在只取键并 PostMessage 给 UI 线程，立刻返回并消费这一次按键。
 static LRESULT CALLBACK CaptureHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode >= 0 && wParam == WM_KEYDOWN && capturing_)
+    if (nCode >= 0 && lParam && capturing_.load() &&
+        (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
     {
         auto *kb = (KBDLLHOOKSTRUCT *)lParam;
-        HandleHotkeyCapture((int)kb->vkCode, (int)kb->scanCode,
-                            (kb->flags & LLKHF_EXTENDED) != 0);
-        if (g_captureHook) { UnhookWindowsHookEx(g_captureHook); g_captureHook = nullptr; }
-        return 1; // 消费按键
+        // 注入键（按键映射器/宏）不作为物理捕获对象，避免游戏宏被误绑。
+        if ((kb->flags & LLKHF_INJECTED) == 0)
+        {
+            const int vk = (int)kb->vkCode;
+            // 修饰键放行：不消费，用户才能按住 Ctrl/Alt/Shift/Win 再按主键。
+            // 旧实现只处理 WM_KEYDOWN，Alt 组合实际是 WM_SYSKEYDOWN，所以按 Alt+F
+            // 永远捕获不到，钩子还会继续吃掉后续按键。
+            if (!IsModifierVk(vk))
+            {
+                const int mods = CurrentModifiers();
+                HHOOK hook = g_captureHook.exchange(nullptr);
+                capturing_.store(false);
+                if (hook) UnhookWindowsHookEx(hook);   // 当前就是消息线程，可直接摘
+                // LPARAM 携带：低 8 位扫描码、0x100 扩展键、16~19 位修饰键。
+                const LPARAM payload =
+                    (LPARAM)(((DWORD)kb->scanCode & 0xFF) |
+                             (((kb->flags & LLKHF_EXTENDED) != 0) ? 0x100u : 0u)) |
+                    ((LPARAM)(mods & 0xF) << 16);
+                if (g_hwnd)
+                {
+                    PostMessageW(g_hwnd, kMsgHotkeyCaptured, (WPARAM)vk, payload);
+                }
+                else
+                {
+                    // 主窗口已销毁：绝不能在钩子线程里直接注册热键/调 WebView2，
+                    // 直接丢弃这一次捕获，等下次打开窗口再设置。
+                    AppLog(L"[hotkey] 捕获完成但主窗口已销毁，丢弃");
+                }
+                return 1; // 捕获期间消费这一个按键（修饰键已放行）
+            }
+        }
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
 static void BeginCapture(bool global, int profile)
 {
-    if (g_captureHook) { UnhookWindowsHookEx(g_captureHook); g_captureHook = nullptr; }
-    capturing_ = true;
+    UnhookCaptureHook();
     captureGlobal_ = global;
     captureProfile_ = global ? -1 : profile;
-    g_captureHook = SetWindowsHookExW(WH_KEYBOARD_LL, CaptureHookProc, GetModuleHandleW(nullptr), 0);
+    capturing_.store(true);
+
+    // 装在 MessageWindow 的消息线程上：该线程 HIGHEST 优先级且有消息循环，
+    // 不会被 WebView2/UI 线程的页面渲染卡住；钩子回调也不会和 UI 抢同一个线程。
+    auto hookResult = std::make_shared<std::atomic<HHOOK>>(nullptr);
+    const bool invoked = msgWindow_.Handle() &&
+        msgWindow_.InvokeOnMessageThread([hookResult] {
+            HHOOK h = SetWindowsHookExW(WH_KEYBOARD_LL, CaptureHookProc,
+                                        GetModuleHandleW(nullptr), 0);
+            hookResult->store(h);
+            // 关键：在消息线程里就发布句柄。否则 Invoke 返回前用户已经按键时，
+            // 钩子回调拿不到句柄、摘不掉钩子，BeginCapture 又会把旧句柄存回去。
+            if (h) g_captureHook.store(h);
+        }, 3000);
+    HHOOK hook = invoked ? hookResult->load() : nullptr;
+    if (!hook)
+    {
+        capturing_.store(false);
+        AppLog(L"[hotkey] 捕获钩子安装失败 (err=%u)", (unsigned)GetLastError());
+        SendStatus(L"hint", L"无法进入快捷键捕获（系统拒绝安装键盘钩子），请重试");
+        SendState(L"sync");   // 让页面清掉「请按键」状态
+        return;
+    }
+    // 极端情况：钩子刚装上用户就按了键，回调已经摘钩并投递了捕获消息。
+    // 不要再存回旧句柄、也不要再开超时定时器，交给 UI 线程处理那条消息即可。
+    if (!capturing_.load() || g_captureHook.load() != hook)
+    {
+        AppLog(L"[hotkey] 捕获钩子安装期间已按键，本次捕获消息已投递");
+        return;
+    }
+    if (g_hwnd) SetTimer(g_hwnd, kTimerCapture, kCaptureTimeoutMs, nullptr);
     AppLog(L"[hotkey] capturing (global=%d profile=%d)", global ? 1 : 0, profile);
 }
 
@@ -1030,6 +1150,7 @@ static JsonValue BuildStatePayload(const wchar_t *type)
     j.Set(L"perapp", JsonValue::BoolValue(data_.PerAppEnabled));
     j.Set(L"capture", JsonValue::BoolValue(data_.Captureable));
     j.Set(L"showFps", JsonValue::BoolValue(data_.ShowFps));
+    j.Set(L"hotkeyCompat", JsonValue::BoolValue(data_.HotkeyCompat));
     // 界面主题（auto/light/dark）：页面据此恢复上次选择；临时文件/旧配置里的
     // "default" 一律按 auto 处理（models 的默认值仍是 auto）。
     std::wstring theme = data_.Theme;
@@ -1246,6 +1367,34 @@ static void HandleMessage(JsonValue &msg)
             // 显示偏好立即落盘：用户不用为了这个开关去点「保存」，重启后也还在
             SaveState();
             AppLog(L"[bridge] 实时帧率显示 = %d（日志详细帧率%s）", v ? 1 : 0, v ? L"已开启" : L"已关闭");
+        }
+        else if (id == L"hotkeycompat")
+        {
+            // 按键兼容模式：全局热键改用被动键盘钩子，不向系统独占注册。
+            data_.HotkeyCompat = v;
+            SaveState();              // 界面偏好立即落盘，不进入“未保存配置”
+            ReapplyHotkeys();         // 已有组合必须按新后端整体重注册
+            bool anyConfigured = data_.GlobalKey != 0;
+            for (const auto &p : data_.Profiles) anyConfigured = anyConfigured || p.HasHotkey();
+            bool anyFail = data_.GlobalKey != 0 && globalHotkeyId_ == 0;
+            for (int i = 0; i < (int)data_.Profiles.size(); i++)
+                if (data_.Profiles[i].HasHotkey() &&
+                    profileHotkeyIds_.find(i) == profileHotkeyIds_.end())
+                    anyFail = true;
+            std::wstring hint;
+            if (anyFail)
+                hint = L"按键兼容模式已切换，但部分热键注册失败（键盘钩子不可用或组合重复），请重试或关闭兼容模式";
+            else if (!anyConfigured)
+                hint = v ? L"按键兼容模式已开启（当前没有设置热键）"
+                         : L"按键兼容模式已关闭（当前没有设置热键）";
+            else
+                hint = v ? L"按键兼容模式已开启：热键不再独占按键，游戏/其它程序也能收到同一按键"
+                         : L"按键兼容模式已关闭：恢复 RegisterHotKey 独占注册";
+            SendStatus(L"hotkeyCompat", hint);
+            SendState(L"sync");
+            AppLog(L"[bridge] 按键兼容模式 = %d（anyConfigured=%d anyFail=%d）",
+                   v ? 1 : 0, anyConfigured ? 1 : 0, anyFail ? 1 : 0);
+            return;
         }
         else if (id == L"autostart")
         {
@@ -1684,6 +1833,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_APP + 1: DrainUiQueue(); return 0;
+    case kMsgHotkeyCaptured:
+    {
+        // 捕获钩子只投递原始信息；注册热键/通知页面的慢操作都在 UI 线程这里做。
+        const int vk = (int)wp;
+        const int scanCode = (int)(lp & 0xFF);
+        const bool extended = (lp & 0x100) != 0;
+        const int mods = (int)((lp >> 16) & 0xF);
+        HandleHotkeyCapture(vk, scanCode, extended, mods);
+        return 0;
+    }
     case kMsgShowWindow:
         // 第二个实例启动时请求显示已有实例：必须走 ShowWindowApp 的完整还原路径
         // （SW_RESTORE/SW_SHOWNA + put_IsVisible + ResizeWebView），否则自启托盘实例
@@ -1728,6 +1887,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else ResizeWebView();
         return 0;
     case WM_TIMER:
+        if (wp == kTimerCapture)
+        {
+            // 页面一直等用户按键（或钩子被系统摘掉）时自动收尾，避免卡在“请按键”。
+            bool wasCapturing = capturing_.exchange(false);
+            captureGlobal_ = false;
+            captureProfile_ = -1;
+            UnhookCaptureHook();
+            if (wasCapturing)
+            {
+                SendStatus(L"hint", L"快捷键捕获超时，已取消");
+                SendState(L"sync");
+            }
+            return 0;
+        }
         if (wp == kTimerFps) { PushPresentFps(); return 0; }
         if (wp == kTimerApply)
         {
@@ -1784,7 +1957,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO *mmi = (MINMAXINFO *)lp;
-        mmi->ptMinTrackSize.x = g_wndW; mmi->ptMinTrackSize.y = g_wndH;   // 最小 = 默认 680x860 DIP
+        mmi->ptMinTrackSize.x = g_wndW; mmi->ptMinTrackSize.y = g_wndH;   // 最小 = 默认 650x678 DIP
         mmi->ptMaxTrackSize.x = 32767; mmi->ptMaxTrackSize.y = 32767;
         return 0;
     }
@@ -1794,7 +1967,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_DESTROY:
         if (watcher_) watcher_->Stop();
-        if (g_captureHook) { UnhookWindowsHookEx(g_captureHook); g_captureHook = nullptr; }
+        capturing_.store(false);
+        UnhookCaptureHook();
         if (hotkeys_) hotkeys_->UnregisterAll();
         RemoveTray();
         FilterEngine::Instance().Reset();
@@ -1933,6 +2107,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     // 后台消息窗口 + 热键
     msgWindow_.Create();
     hotkeys_ = std::make_unique<HotkeyService>(msgWindow_);
+    hotkeys_->SetPreferHook(data_.HotkeyCompat);
     for (int i = 0; i < (int)data_.Profiles.size(); i++) RegisterProfileHotkey(i);
     RegisterGlobalToggle();
 
@@ -1986,9 +2161,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     ReleaseDC(nullptr, hdc);
     if (dpi < 96) dpi = 96;
 
-    // 设计基准 680x860 DIP，按系统缩放换算物理像素；若超过工作区约 90% 则等比缩小（避免 1080p 上窗口过大）
-    int physW = MulDiv(680, (int)dpi, 96);
-    int physH = MulDiv(860, (int)dpi, 96);
+    // 新 UI（webui2）的设计基准 650×678 DIP，按系统缩放换算物理像素；
+    // 若超过工作区约 90% 则等比缩小（避免 1080p/高缩放下窗口过大）。
+    int physW = MulDiv(650, (int)dpi, 96);
+    int physH = MulDiv(678, (int)dpi, 96);
     RECT wa{};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0))
     {

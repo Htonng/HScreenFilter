@@ -196,6 +196,7 @@ JsonValue ProfileData::ToJson() const
     j.Set(L"Theme", JsonValue::StrValue(Theme));
     j.Set(L"Captureable", JsonValue::BoolValue(Captureable));
     j.Set(L"ShowFps", JsonValue::BoolValue(ShowFps));
+    j.Set(L"HotkeyCompat", JsonValue::BoolValue(HotkeyCompat));
     j.Set(L"PerAppEnabled", JsonValue::BoolValue(PerAppEnabled));
 
     JsonValue bindings = JsonValue::ArrayValue();
@@ -234,6 +235,7 @@ void ProfileData::FromJson(const JsonValue& j)
     Theme = j.GetString(L"Theme", L"default");
     Captureable = j.GetBool(L"Captureable", false);
     ShowFps = j.GetBool(L"ShowFps", false);
+    HotkeyCompat = j.GetBool(L"HotkeyCompat", false);
     PerAppEnabled = j.GetBool(L"PerAppEnabled", false);
 
     const JsonValue* displays = j.Get(L"Displays");

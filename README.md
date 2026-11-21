@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?style=flat-square" alt="platform" />
   <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square" alt="C++17" />
-  <img src="https://img.shields.io/badge/version-v2.3.1-7C5CFF?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-v2.3.2-7C5CFF?style=flat-square" alt="version" />
   <a href="https://github.com/Htonng/HScreenFilter/stargazers"><img src="https://img.shields.io/github/stars/Htonng/HScreenFilter?style=flat-square&color=7C5CFF" alt="stars" /></a>
 </p>
 
@@ -41,7 +41,7 @@
 4. 首次使用需要 **Microsoft Edge WebView2 Runtime**（Windows 10/11 通常已随系统或 Edge 安装）。
 
 > **从 v2.3.0 升级**：v2.3.0 存在「打开滤镜全黑屏」问题（工作纹理继承共享标志 + 覆盖层自捕获），
-> 请使用 **v2.3.1** 或更高版本。详见 [CHANGELOG](CHANGELOG.md)。
+> 请使用 **v2.3.2** 或更高版本。详见 [CHANGELOG](CHANGELOG.md)。
 
 ## 效果预览
 
@@ -76,13 +76,14 @@
 | **HDR 下的引擎选择** | HDR 显示器上放大镜/伽马引擎对 HDR 桌面等于失效，检测到 HDR 时自动改用 LUT 引擎（界面开关显示为开且锁住；不改动用户保存的设置） |
 | **按应用切换** | 添加/编辑/删除检测应用、3 秒倒计时拾取前台应用、后台线程 500ms 轮询前台自动切换绑定配置或自动关闭 |
 | **配置与快捷键** | 配置列表（名称/引擎/快捷键/启用）、新建/重命名/删除/导入/导出/上移/下移、每配置热键 + 全局开关快捷键、开机自启、自启进托盘 |
+| **按键兼容模式** | 设置页开关：开启后全局热键改用被动键盘钩子、不 `RegisterHotKey` 独占按键，游戏和其它程序仍能收到同一按键；偏好写入 `profiles.json` 的 `HotkeyCompat` |
 | **偏好持久化** | 总开关、显示器启用、按应用切换、开机自启、界面主题立即写入 `profiles.json`；基础参数（含暗场景优化）随配置保存/导出/导入，并由 `FilterSettings::Equals` 参与未保存修改判定 |
 | **实时帧率** | 覆盖层右上角显示实时帧率 + 界面数字同步；日志每秒写一条帧率明细（取帧/探测/准备/绘制分段、长间隔、源帧累积、LUT 重建次数），用于定位游戏内卡顿 |
 
 - **顶部常驻**：显示器选择 + 每显示器启用 + 滤镜总开关 + 全局开关快捷键（含清除）
 - **托盘菜单**：启用滤镜（勾选）、全部配置列表切换、显示/退出；最小化/关闭进托盘
 - **主题**：跟随系统 / 浅色 / 深色（Flat）
-- **窗口**：最小尺寸按系统缩放/工作区自适应（1080p 高缩放下自动缩小），可拉大
+- **窗口**：默认内容区 650×678 DIP（按系统缩放换算物理像素，外层另含系统标题栏/边框）；最小尺寸按工作区自适应，可拉大
 
 > 日志只有一个文件：`%LocalAppData%\HScreenFilter\debug.log`（界面「调试日志」按钮直接打开），
 > 宿主与滤镜引擎的记录都在里面（宿主行带 `[App]` 分类）。
@@ -91,7 +92,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| [HScreenFilter-v2.3.1.zip](https://github.com/Htonng/HScreenFilter/releases/latest) | 推荐。包含 `HScreenFilter.exe`、`WebView2Loader.dll`、`webui2\` |
+| [HScreenFilter-v2.3.2.zip](https://github.com/Htonng/HScreenFilter/releases/latest) | 推荐。包含 `HScreenFilter.exe`、`WebView2Loader.dll`、`webui2\` |
 | [历史版本](https://github.com/Htonng/HScreenFilter/releases) | 查看全部 release 与变更说明 |
 
 运行前提：**Windows 10 1903+ / Windows 11**、**WebView2 Runtime**。
@@ -108,7 +109,7 @@ LUT 引擎需要可用的 D3D11 显卡；不可用时自动回退到放大镜/�
 
 ```powershell
 .\build.ps1                  # 主程序（C++ 原生版，输出 build\HScreenFilter.exe）
-.\build-release.ps1          # v2.3.1 发布版（输出 dist\HScreenFilter-v2.3.1\ + zip）
+.\build-release.ps1          # v2.3.2 发布版（输出 dist\HScreenFilter-v2.3.2\ + zip）
 ```
 
 自检 / 引擎测试：

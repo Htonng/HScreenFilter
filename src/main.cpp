@@ -7,6 +7,7 @@
 #include "ui/main_window.h"
 #include "engines/hlsl.h"
 #include "engines/filter_engine.h"
+#include "engines/render/scene_weight.h"
 
 namespace hsf {
 
@@ -122,6 +123,7 @@ static int RunSelfTest()
         data.IsEnabled = true;
         data.UseDxgi = true;
         data.Theme = L"mica";
+        data.HotkeyCompat = true;
         data.GlobalKey = 0x31;
         data.GlobalModifiers = 0x2;
         data.GlobalDisplay = L"Ctrl+1";
@@ -163,7 +165,8 @@ static int RunSelfTest()
             ProfileData back;
             back.FromJson(root);
             bool ok = back.IsEnabled == true && back.UseDxgi == true &&
-                      back.Theme == L"mica" && back.GlobalDisplay == L"Ctrl+1" &&
+                      back.Theme == L"mica" && back.HotkeyCompat == true &&
+                      back.GlobalDisplay == L"Ctrl+1" &&
                       back.Current.Brightness == -12.5 &&
                       back.Current.Sharpen == 42 &&
                       back.Current.NoiseReduction == 23 &&
@@ -229,6 +232,71 @@ static int RunSelfTest()
         else
         {
             out(L"[ OK ] 参数元数据（12 项）、暗场景 Equals/JSON、范围夹取");
+        }
+    }
+
+    // 1c) 暗场景自适应权重：长时平滑 + 变化限速，交替明暗不能把滤镜强度来回翻
+    {
+        auto simulate = [](const std::vector<double>& means, uint32_t stepMs,
+                           double& minW, double& maxW, double& maxStep, double& lastW) {
+            SceneWeightState st;
+            uint32_t now = 1000;
+            double prev = st.appliedWeight;
+            bool first = true;
+            for (double m : means)
+            {
+                double w = st.appliedWeight;
+                if (AdvanceDarkSceneWeight(st, m, now, true, true, w))
+                {
+                    if (w < minW) minW = w;
+                    if (w > maxW) maxW = w;
+                    if (!first)
+                    {
+                        double d = fabs(w - prev);
+                        if (d > maxStep) maxStep = d;
+                    }
+                    prev = w;
+                    first = false;
+                }
+                now += stepMs;
+            }
+            lastW = st.appliedWeight;
+        };
+
+        // 复刻用户日志里的真实序列：手电/枪口闪光让 5 块采样每秒在 0.05 与 0.34 之间跳。
+        // 旧实现会按原始亮度直接触发，权重 0.5↔1.0；新实现 30 秒内只缓慢过渡。
+        std::vector<double> alternating;
+        for (int i = 0; i < 30; i++) alternating.push_back((i % 2) ? 0.34 : 0.05);
+        double minW = 1.0, maxW = 1.0, maxStep = 0.0, lastW = 1.0;
+        simulate(alternating, 1000, minW, maxW, maxStep, lastW);
+        bool ok = (minW >= 0.45 && maxW <= 1.0001) &&
+                  (maxStep <= kSceneWeightMaxStep + 1e-6) &&
+                  (maxW - minW <= 0.25) &&
+                  (lastW >= 0.5 && lastW <= 0.98);
+
+        // 明亮稳定场景：稳定后的第一拍直接给最低权重，不用慢慢爬。
+        SceneWeightState bright;
+        double bw = 1.0;
+        bool changed = AdvanceDarkSceneWeight(bright, 0.76, 1000, true, true, bw);
+        ok = ok && changed && fabs(bw - kDarkSceneMinWeight) < 1e-9;
+
+        // 启动未稳（前 2.5s）不允许改权重；关掉滑块时状态清空。
+        SceneWeightState early;
+        double ew = 1.0;
+        ok = ok && !AdvanceDarkSceneWeight(early, 0.10, 1000, false, true, ew) &&
+                   fabs(ew - 1.0) < 1e-9;
+        double ow = 1.0;
+        ok = ok && !AdvanceDarkSceneWeight(early, 0.10, 2000, true, false, ow) &&
+                   early.smoothedMean < 0.0;
+
+        if (!ok)
+        {
+            out(L"[FAIL] 暗场景权重平滑/限速（仍会忽强忽弱）");
+            fails++;
+        }
+        else
+        {
+            out(L"[ OK ] 暗场景权重长时平滑 + 限速（交替 0.05/0.34 不再抖动）");
         }
     }
 
@@ -364,15 +432,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     Log::WriteFmt(L"Main", L"DPI 感知设置: ok=%d err=%u", dpiOk ? 1 : 0, (unsigned)GetLastError());
     SetUnhandledExceptionFilter(CrashFilter);
 
-    // 单实例
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"HScreenFilter_SingleInstance");
-    if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        if (mutex) CloseHandle(mutex);
-        return 0;
-    }
-
-    // 命令行参数
+    // 命令行参数（先解析：--selftest 是屏幕安全的自检，不应该被正在运行的正式实例挡住；
+    // 否则开发时开着 HScreenFilter 就永远跑不了自检）。
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool selftest = false;
@@ -405,16 +466,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         LocalFree(argv);
     }
 
+    // 单实例（--selftest 例外：它不碰引擎/屏幕，允许与正在运行的实例并存）
+    HANDLE mutex = nullptr;
+    if (!selftest)
+    {
+        mutex = CreateMutexW(nullptr, TRUE, L"HScreenFilter_SingleInstance");
+        if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            if (mutex) CloseHandle(mutex);
+            // 已有实例：不在这里走静态析构（异步日志写线程 join 可能把第二实例
+            // 卡在退出阶段，日志文件还被第一个实例占着）。正式版 app_main.cpp 同样用 ExitProcess。
+            ExitProcess(0);
+        }
+    }
+
     if (selftest)
     {
-        int rc = RunSelfTest();
-        CloseHandle(mutex);
-        return rc;
+        return RunSelfTest();
     }
     if (enginetest)
     {
         int rc = RunEngineTest(engineTestSeconds, engineTestCycle);
-        CloseHandle(mutex);
+        if (mutex) CloseHandle(mutex);
         return rc;
     }
 

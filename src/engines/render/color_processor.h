@@ -6,6 +6,7 @@
 //   * 负责参数上传、LUT 重建限速、中性直通和暗场景自适应权重。
 #pragma once
 #include "render_types.h"
+#include "scene_weight.h"
 #include "models.h"
 #include "../hlsl.h"
 
@@ -31,6 +32,8 @@ public:
     bool IsNeutral() const { return neutral_.load(); }
 
     // 每秒一次的场景采样进入：越暗保留越强的暗场景优化权重。
+    // 内部走 scene_weight.h 的长时平滑 + 变化限速，避免游戏里手电/明暗切换让
+    // 滤镜强度每秒在 0.5↔1.0 之间跳（用户反馈的「一会强一会弱」）。
     // 返回 true 表示权重变化已请求一次 LUT 重建（已记日志）。
     bool UpdateSceneWeight(double mean, DWORD nowTick, bool startupStable);
 
@@ -67,17 +70,13 @@ private:
     std::atomic<bool> paramsDirty_{ false };
     std::atomic<bool> neutral_{ true };
 
-    // 暗场景优化的场景自适应权重（0.5..1）。只由渲染线程写、渲染线程读。
-    double sceneWeight_ = 1.0;
-    double lastSceneWeight_ = -1.0;
-    DWORD lastSceneRebuildTick_ = 0;
+    // 暗场景优化的场景自适应权重状态（只由渲染线程写、渲染线程读）。
+    // 平滑与限速逻辑在 scene_weight.h：短促明暗变化不再直接改变滤镜强度。
+    SceneWeightState sceneWeightState_;
 
     // LUT 重建最小间隔：拖动滑块时参数每帧都变，重建 64³ 计算着色器很贵。
     static constexpr DWORD kLutRebuildMinIntervalMs = 30;
     DWORD lastLutRebuildTick_ = 0;
-
-    // 用户滑块永远至少保留这个比例（场景采样只有 5 块 16×16，不足以否决用户意图）。
-    static constexpr double kDarkSceneMinWeight = 0.5;
 };
 
 } // namespace hsf

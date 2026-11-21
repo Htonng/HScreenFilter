@@ -267,6 +267,9 @@ struct ProfileData
     bool Captureable = false;
     // 界面「显示滤镜实时帧率」：右上角显示实时帧率，并在日志里每秒写一条帧率明细
     bool ShowFps = false;
+    // 按键兼容模式：全局热键不 RegisterHotKey，改用被动低级键盘钩子，
+    // 游戏/其它程序仍能收到同一按键（代价：游戏自己的钩子先消费时热键可能不响应）。
+    bool HotkeyCompat = false;
     bool PerAppEnabled = false;
     std::vector<AppBinding> AppBindings;
 
